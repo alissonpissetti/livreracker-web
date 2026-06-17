@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DeviceLocation } from '../types';
-import { buildRoadPath, mergeActiveSegments } from '../utils/directionsPath';
-import type { LatLng } from '../utils/directionsPath';
-import { loadGoogleMaps } from '../utils/googleMaps';
+import { buildActiveRoadPath, buildRoadPath, createRouteProvider } from '../utils/directionsPath';
+import type { LatLng, RouteProvider } from '../utils/directionsPath';
+import { getGoogleMapId, loadGoogleMaps } from '../utils/googleMaps';
 import {
+  applyReadingMarkerRole,
+  createReadingMarkerElement,
   markerRoleForIndex,
   markerZIndex,
-  readingMarkerIcon,
 } from '../utils/mapPointInfo';
 import { TrackingPointPanel } from './TrackingPointPanel';
 
 type TrackingMapProps = {
   points: DeviceLocation[];
   ready?: boolean;
+};
+
+type MarkerEntry = {
+  marker: google.maps.marker.AdvancedMarkerElement;
+  content: HTMLDivElement;
 };
 
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? '';
@@ -28,13 +34,13 @@ function pointsSignature(points: DeviceLocation[]): string {
 export function TrackingMap({ points, ready = true }: TrackingMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
-  const symbolPathRef = useRef<typeof google.maps.SymbolPath | null>(null);
+  const routeProviderRef = useRef<RouteProvider | null>(null);
+  const activeRouteRequestRef = useRef(0);
   const panelOpenRef = useRef(true);
-  const roadSegmentsRef = useRef<LatLng[][]>([]);
   const overlaysRef = useRef<{
     routeLine: google.maps.Polyline | null;
     activeRouteLine: google.maps.Polyline | null;
-    markers: google.maps.Marker[];
+    markers: MarkerEntry[];
   }>({ routeLine: null, activeRouteLine: null, markers: [] });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -56,27 +62,40 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
   }, [points.length]);
 
   const updateMarkerStyles = useCallback((selectedIndex: number) => {
-    const SymbolPath = symbolPathRef.current;
-    if (!SymbolPath) return;
-
-    overlaysRef.current.markers.forEach((marker, index) => {
+    overlaysRef.current.markers.forEach((entry, index) => {
       const role = markerRoleForIndex(index, selectedIndex, overlaysRef.current.markers.length);
-      marker.setIcon(readingMarkerIcon(SymbolPath, role));
-      marker.setZIndex(markerZIndex(role));
+      applyReadingMarkerRole(entry.content, role);
+      entry.marker.zIndex = markerZIndex(role);
     });
   }, []);
 
-  const updateActiveRoute = useCallback((index: number) => {
-    const map = mapRef.current;
-    if (!map) return;
+  const updateActiveRoute = useCallback(
+    async (index: number) => {
+      const map = mapRef.current;
+      const provider = routeProviderRef.current;
+      const line = overlaysRef.current.activeRouteLine;
+      if (!map || !line) return;
 
-    const activePath = mergeActiveSegments(roadSegmentsRef.current, index);
+      const start = Math.max(0, index - 1);
+      const end = Math.min(points.length - 1, index + 1);
+      const slice: LatLng[] = points
+        .slice(start, end + 1)
+        .map((point) => ({ lat: point.latitude, lng: point.longitude }));
 
-    if (overlaysRef.current.activeRouteLine) {
-      overlaysRef.current.activeRouteLine.setPath(activePath);
-      overlaysRef.current.activeRouteLine.setMap(activePath.length > 0 ? map : null);
-    }
-  }, []);
+      line.setPath(slice);
+      line.setMap(slice.length > 0 ? map : null);
+
+      if (!provider || slice.length < 2) return;
+
+      const requestId = ++activeRouteRequestRef.current;
+      const path = await buildActiveRoadPath(provider, slice);
+      if (requestId !== activeRouteRequestRef.current) return;
+
+      line.setPath(path);
+      line.setMap(map);
+    },
+    [points],
+  );
 
   const focusReading = useCallback(
     (index: number) => {
@@ -91,7 +110,7 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
         .map((item) => ({ lat: item.latitude, lng: item.longitude }));
 
       updateMarkerStyles(index);
-      updateActiveRoute(index);
+      void updateActiveRoute(index);
 
       const padding = {
         top: 56,
@@ -153,17 +172,19 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
     const container = containerRef.current;
 
     function clearOverlays() {
-      overlaysRef.current.markers.forEach((marker) => marker.setMap(null));
+      overlaysRef.current.markers.forEach((entry) => {
+        entry.marker.map = null;
+      });
       overlaysRef.current.routeLine?.setMap(null);
       overlaysRef.current.activeRouteLine?.setMap(null);
       overlaysRef.current = { routeLine: null, activeRouteLine: null, markers: [] };
-      roadSegmentsRef.current = [];
     }
 
     function destroyMap() {
       clearOverlays();
       mapRef.current = null;
-      symbolPathRef.current = null;
+      routeProviderRef.current = null;
+      activeRouteRequestRef.current += 1;
       setMapReady(false);
       if (container) {
         container.replaceChildren();
@@ -194,13 +215,12 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
 
     loadGoogleMaps(MAPS_KEY)
       .then(
-        async ({ Map, Polyline, LatLngBounds, Marker, DirectionsService, SymbolPath }) => {
+        async ({ Map, Polyline, LatLngBounds, AdvancedMarkerElement, Route, DirectionsService }) => {
           if (cancelled || !containerRef.current) return;
 
-          symbolPathRef.current = SymbolPath;
-
-          const directionsService = new DirectionsService();
-          const routeResult = await buildRoadPath(directionsService, gpsPath);
+          const routeProvider = createRouteProvider(Route, DirectionsService);
+          routeProviderRef.current = routeProvider;
+          const routeResult = await buildRoadPath(routeProvider, gpsPath);
 
           if (cancelled || !containerRef.current) return;
 
@@ -220,6 +240,7 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
 
           if (!mapRef.current) {
             mapRef.current = new Map(containerRef.current, {
+              mapId: getGoogleMapId(),
               center: routeResult.path[0],
               zoom: 13,
               mapTypeControl: false,
@@ -229,8 +250,6 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
           }
 
           const map = mapRef.current;
-
-          roadSegmentsRef.current = routeResult.segments;
 
           overlaysRef.current.routeLine = new Polyline({
             path: routeResult.path,
@@ -243,7 +262,7 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
           });
 
           overlaysRef.current.activeRouteLine = new Polyline({
-            path: mergeActiveSegments(routeResult.segments, 0),
+            path: gpsPath.slice(0, Math.min(2, gpsPath.length)),
             geodesic: true,
             strokeColor: '#facc15',
             strokeOpacity: 1,
@@ -252,11 +271,12 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
             zIndex: 2,
           });
 
-          const markers: google.maps.Marker[] = points.map((point, index) => {
-            const marker = new Marker({
+          const markers: MarkerEntry[] = points.map((point, index) => {
+            const content = createReadingMarkerElement('default');
+            const marker = new AdvancedMarkerElement({
               map,
               position: { lat: point.latitude, lng: point.longitude },
-              icon: readingMarkerIcon(SymbolPath, 'default'),
+              content,
               zIndex: 1,
               title: `Leitura #${index + 1}`,
             });
@@ -265,7 +285,7 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
               setActiveIndex(index);
             });
 
-            return marker;
+            return { marker, content };
           });
 
           overlaysRef.current.markers = markers;

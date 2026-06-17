@@ -14,20 +14,10 @@ export type AuthResponse = {
   user: User;
 };
 
-export type LoginChallengeResponse = {
-  login_challenge_token: string;
+export type PhoneLoginRequestResponse = {
   phone_mask: string;
-  expires_in: number;
   message: string;
 };
-
-export type LoginResult = AuthResponse | LoginChallengeResponse;
-
-export function isLoginChallenge(
-  result: User | LoginChallengeResponse,
-): result is LoginChallengeResponse {
-  return 'login_challenge_token' in result;
-}
 
 export type Product = {
   slug: string;

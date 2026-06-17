@@ -405,6 +405,34 @@ input:focus {
   width: min(440px, 100%);
 }
 
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.auth-tab {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.55rem 0.75rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.auth-tab.active {
+  color: var(--text);
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.auth-hint {
+  margin: 0.35rem 0 0.75rem;
+  font-size: 0.92rem;
+}
+
 .auth-card form {
   margin-top: 1rem;
 }
@@ -451,7 +479,7 @@ input:focus {
   height: 3.25rem;
   border-radius: 1rem;
   background: rgba(56, 189, 248, 0.12);
-  color: var(--accent);
+  color: var(--primary);
   flex-shrink: 0;
 }
 

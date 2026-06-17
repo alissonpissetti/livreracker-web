@@ -9,9 +9,8 @@ import type {
   AdminUserDetail,
   AdminVoucher,
   AuthResponse,
-  LoginChallengeResponse,
-  LoginResult,
   CheckoutResult,
+  PhoneLoginRequestResponse,
   Product,
   User,
   VoucherPreview,
@@ -105,26 +104,31 @@ export function register(body: {
 }
 
 export function login(body: { email: string; password: string }) {
-  return api<LoginResult>('/v1/auth/login', {
+  return api<AuthResponse>('/v1/auth/login', {
     method: 'POST',
     body: JSON.stringify(body),
     auth: false,
   });
 }
 
-export function verifyLoginOtp(body: {
-  login_challenge_token: string;
-  code: string;
-}) {
-  return api<AuthResponse>('/v1/auth/login/verify-otp', {
+export function requestPhoneLogin(body: { phone: string }) {
+  return api<PhoneLoginRequestResponse>('/v1/auth/login/phone', {
     method: 'POST',
     body: JSON.stringify(body),
     auth: false,
   });
 }
 
-export function resendLoginOtp(body: { login_challenge_token: string }) {
-  return api<LoginChallengeResponse>('/v1/auth/login/resend-otp', {
+export function verifyPhoneLogin(body: { phone: string; code: string }) {
+  return api<AuthResponse>('/v1/auth/login/phone/verify', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    auth: false,
+  });
+}
+
+export function resendPhoneLogin(body: { phone: string }) {
+  return api<PhoneLoginRequestResponse>('/v1/auth/login/phone/resend', {
     method: 'POST',
     body: JSON.stringify(body),
     auth: false,

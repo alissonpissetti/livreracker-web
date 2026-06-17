@@ -13,21 +13,20 @@ import {
   getToken,
   login as apiLogin,
   register as apiRegister,
+  requestPhoneLogin as apiRequestPhoneLogin,
+  resendPhoneLogin as apiResendPhoneLogin,
   setToken,
-  verifyLoginOtp as apiVerifyLoginOtp,
-  resendLoginOtp as apiResendLoginOtp,
+  verifyPhoneLogin as apiVerifyPhoneLogin,
 } from '../api/client';
-import type { LoginChallengeResponse, User } from '../types';
+import type { PhoneLoginRequestResponse, User } from '../types';
 
 type AuthContextValue = {
   user: User | null;
   loading: boolean;
-  login: (
-    email: string,
-    password: string,
-  ) => Promise<User | LoginChallengeResponse>;
-  verifyLoginOtp: (challengeToken: string, code: string) => Promise<User>;
-  resendLoginOtp: (challengeToken: string) => Promise<LoginChallengeResponse>;
+  login: (email: string, password: string) => Promise<User>;
+  requestPhoneLogin: (phone: string) => Promise<PhoneLoginRequestResponse>;
+  verifyPhoneLogin: (phone: string, code: string) => Promise<User>;
+  resendPhoneLogin: (phone: string) => Promise<PhoneLoginRequestResponse>;
   register: (
     name: string,
     email: string,
@@ -69,29 +68,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (email: string, password: string) => {
     const response = await apiLogin({ email, password });
-    if ('login_challenge_token' in response) {
-      return response;
-    }
     setToken(response.access_token);
     setUser(response.user);
     return response.user;
   }, []);
 
-  const verifyLoginOtp = useCallback(
-    async (challengeToken: string, code: string) => {
-      const response = await apiVerifyLoginOtp({
-        login_challenge_token: challengeToken,
-        code,
-      });
-      setToken(response.access_token);
-      setUser(response.user);
-      return response.user;
-    },
-    [],
-  );
+  const requestPhoneLogin = useCallback(async (phone: string) => {
+    return apiRequestPhoneLogin({ phone });
+  }, []);
 
-  const resendLoginOtp = useCallback(async (challengeToken: string) => {
-    return apiResendLoginOtp({ login_challenge_token: challengeToken });
+  const verifyPhoneLogin = useCallback(async (phone: string, code: string) => {
+    const response = await apiVerifyPhoneLogin({ phone, code });
+    setToken(response.access_token);
+    setUser(response.user);
+    return response.user;
+  }, []);
+
+  const resendPhoneLogin = useCallback(async (phone: string) => {
+    return apiResendPhoneLogin({ phone });
   }, []);
 
   const register = useCallback(
@@ -118,8 +112,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       loading,
       login,
-      verifyLoginOtp,
-      resendLoginOtp,
+      requestPhoneLogin,
+      verifyPhoneLogin,
+      resendPhoneLogin,
       register,
       logout,
       refresh,
@@ -128,8 +123,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       loading,
       login,
-      verifyLoginOtp,
-      resendLoginOtp,
+      requestPhoneLogin,
+      verifyPhoneLogin,
+      resendPhoneLogin,
       register,
       logout,
       refresh,

@@ -4,11 +4,13 @@ export type GoogleMapsApi = {
   Map: typeof google.maps.Map;
   Polyline: typeof google.maps.Polyline;
   LatLngBounds: typeof google.maps.LatLngBounds;
-  Marker: typeof google.maps.Marker;
+  AdvancedMarkerElement: typeof google.maps.marker.AdvancedMarkerElement;
+  Route: typeof google.maps.routes.Route;
   DirectionsService: typeof google.maps.DirectionsService;
   InfoWindow: typeof google.maps.InfoWindow;
-  SymbolPath: typeof google.maps.SymbolPath;
 };
+
+const MAP_ID = import.meta.env.VITE_GOOGLE_MAPS_MAP_ID ?? 'DEMO_MAP_ID';
 
 let configuredKey = '';
 let libraries: Promise<GoogleMapsApi> | null = null;
@@ -30,20 +32,31 @@ export function loadGoogleMaps(apiKey: string): Promise<GoogleMapsApi> {
   if (!libraries) {
     setOptions({ key: apiKey, v: 'weekly' });
 
-    libraries = Promise.all([
-      importLibrary('maps'),
-      importLibrary('marker'),
-      importLibrary('routes'),
-    ]).then(() => ({
-      Map: google.maps.Map,
-      Polyline: google.maps.Polyline,
-      LatLngBounds: google.maps.LatLngBounds,
-      Marker: google.maps.Marker,
-      DirectionsService: google.maps.DirectionsService,
-      InfoWindow: google.maps.InfoWindow,
-      SymbolPath: google.maps.SymbolPath,
-    }));
+    libraries = (async () => {
+      const [, markerLib, routesLib] = await Promise.all([
+        importLibrary('maps'),
+        importLibrary('marker'),
+        importLibrary('routes'),
+      ]);
+
+      const { AdvancedMarkerElement } = markerLib as google.maps.MarkerLibrary;
+      const { Route } = routesLib as google.maps.RoutesLibrary;
+
+      return {
+        Map: google.maps.Map,
+        Polyline: google.maps.Polyline,
+        LatLngBounds: google.maps.LatLngBounds,
+        AdvancedMarkerElement,
+        Route,
+        DirectionsService: google.maps.DirectionsService,
+        InfoWindow: google.maps.InfoWindow,
+      };
+    })();
   }
 
   return libraries;
+}
+
+export function getGoogleMapId(): string {
+  return MAP_ID;
 }
