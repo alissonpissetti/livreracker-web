@@ -15,12 +15,19 @@ RUN npm run build
 
 FROM nginx:1.27-alpine AS runner
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+ENV PORT=80
+
+RUN apk add --no-cache gettext
+
+COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY nginx/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 COPY --from=builder /app/dist /usr/share/nginx/html
 
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
+  CMD wget -q -O /dev/null "http://127.0.0.1:80/health" || exit 1
 
-CMD ["nginx", "-g", "daemon off;"]
+ENTRYPOINT ["/docker-entrypoint.sh"]
