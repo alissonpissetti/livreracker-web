@@ -71,10 +71,18 @@ export async function api<T>(
     }
   }
 
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+    });
+  } catch {
+    const hint = API_BASE
+      ? `Não foi possível conectar em ${API_BASE}. Verifique se a API está no ar e se WEB_ORIGIN inclui ${window.location.origin}.`
+      : 'VITE_API_URL não foi definida no build do site. Configure no Coolify (ex: https://api.livretracker.com) e faça redeploy.';
+    throw new Error(hint);
+  }
 
   if (!response.ok) {
     throw new Error(await parseError(response));
