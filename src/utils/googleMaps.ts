@@ -6,7 +6,6 @@ export type GoogleMapsApi = {
   LatLngBounds: typeof google.maps.LatLngBounds;
   AdvancedMarkerElement: typeof google.maps.marker.AdvancedMarkerElement;
   Route: typeof google.maps.routes.Route;
-  DirectionsService: typeof google.maps.DirectionsService;
   InfoWindow: typeof google.maps.InfoWindow;
 };
 
@@ -48,7 +47,6 @@ export function loadGoogleMaps(apiKey: string): Promise<GoogleMapsApi> {
         LatLngBounds: google.maps.LatLngBounds,
         AdvancedMarkerElement,
         Route,
-        DirectionsService: google.maps.DirectionsService,
         InfoWindow: google.maps.InfoWindow,
       };
     })();

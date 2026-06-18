@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DeviceLocation } from '../types';
 import { buildActiveRoadPath, buildRoadPath, createRouteProvider } from '../utils/directionsPath';
 import type { LatLng, RouteProvider } from '../utils/directionsPath';
@@ -14,6 +14,8 @@ import { TrackingPointPanel } from './TrackingPointPanel';
 type TrackingMapProps = {
   points: DeviceLocation[];
   ready?: boolean;
+  resetKey?: string;
+  live?: boolean;
 };
 
 type MarkerEntry = {
@@ -21,27 +23,79 @@ type MarkerEntry = {
   content: HTMLDivElement;
 };
 
+type LatLngLiteral = { lat: number; lng: number };
+
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? '';
 const PANEL_WIDTH = 300;
+const LIVE_ZOOM = 16;
 
-function pointsSignature(points: DeviceLocation[]): string {
-  if (points.length === 0) return '';
-  const first = points[0];
-  const last = points[points.length - 1];
-  return `${points.length}:${first.id}:${last.id}:${first.recorded_at}:${last.recorded_at}`;
+function mapPadding(panelOpen: boolean): google.maps.Padding {
+  return {
+    top: 56,
+    right: panelOpen ? PANEL_WIDTH + 24 : 48,
+    bottom: 48,
+    left: 48,
+  };
 }
 
-export function TrackingMap({ points, ready = true }: TrackingMapProps) {
+function toLatLng(point: DeviceLocation): LatLngLiteral {
+  return { lat: point.latitude, lng: point.longitude };
+}
+
+function boundsNeedZoom(bounds: google.maps.LatLngBounds): boolean {
+  const ne = bounds.getNorthEast();
+  const sw = bounds.getSouthWest();
+  return ne.lat() === sw.lat() && ne.lng() === sw.lng();
+}
+
+function focusMapOnSegment(
+  map: google.maps.Map,
+  segment: LatLngLiteral[],
+  padding: google.maps.Padding,
+): void {
+  if (segment.length === 0) {
+    return;
+  }
+
+  if (segment.length === 1) {
+    map.setCenter(segment[0]);
+    map.setZoom(LIVE_ZOOM);
+    return;
+  }
+
+  const bounds = new google.maps.LatLngBounds();
+  segment.forEach((point) => bounds.extend(point));
+
+  if (boundsNeedZoom(bounds)) {
+    map.setCenter(segment[segment.length - 1]);
+    map.setZoom(LIVE_ZOOM);
+    return;
+  }
+
+  map.fitBounds(bounds, padding);
+}
+
+export function TrackingMap({
+  points,
+  ready = true,
+  resetKey = 'default',
+  live = false,
+}: TrackingMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const routeProviderRef = useRef<RouteProvider | null>(null);
   const activeRouteRequestRef = useRef(0);
   const panelOpenRef = useRef(true);
+  const prevPointsLengthRef = useRef(0);
+  const pointsRef = useRef(points);
+  const liveRef = useRef(live);
+  const syncLiveViewRef = useRef<() => void>(() => {});
   const overlaysRef = useRef<{
     routeLine: google.maps.Polyline | null;
     activeRouteLine: google.maps.Polyline | null;
     markers: MarkerEntry[];
   }>({ routeLine: null, activeRouteLine: null, markers: [] });
+
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [mapReady, setMapReady] = useState(false);
@@ -49,17 +103,20 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
   const [routeWarning, setRouteWarning] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const [panelOpen, setPanelOpen] = useState(true);
-  const signature = useMemo(() => pointsSignature(points), [points]);
 
   panelOpenRef.current = panelOpen;
+  pointsRef.current = points;
+  liveRef.current = live;
 
   const goPrevious = useCallback(() => {
+    if (live) return;
     setActiveIndex((current) => Math.max(0, current - 1));
-  }, []);
+  }, [live]);
 
   const goNext = useCallback(() => {
+    if (live) return;
     setActiveIndex((current) => Math.min(points.length - 1, current + 1));
-  }, [points.length]);
+  }, [live, points.length]);
 
   const updateMarkerStyles = useCallback((selectedIndex: number) => {
     overlaysRef.current.markers.forEach((entry, index) => {
@@ -69,79 +126,100 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
     });
   }, []);
 
-  const updateActiveRoute = useCallback(
-    async (index: number) => {
-      const map = mapRef.current;
-      const provider = routeProviderRef.current;
-      const line = overlaysRef.current.activeRouteLine;
-      if (!map || !line) return;
+  const updateActiveRoute = useCallback(async (index: number) => {
+    const map = mapRef.current;
+    const provider = routeProviderRef.current;
+    const line = overlaysRef.current.activeRouteLine;
+    const currentPoints = pointsRef.current;
+    if (!map || !line || currentPoints.length === 0) {
+      return;
+    }
 
-      const start = Math.max(0, index - 1);
-      const end = Math.min(points.length - 1, index + 1);
-      const slice: LatLng[] = points
-        .slice(start, end + 1)
-        .map((point) => ({ lat: point.latitude, lng: point.longitude }));
+    const start = Math.max(0, index - 1);
+    const end = index;
+    const slice: LatLng[] = currentPoints
+      .slice(start, end + 1)
+      .map(toLatLng);
 
-      line.setPath(slice);
-      line.setMap(slice.length > 0 ? map : null);
+    line.setPath(slice);
+    line.setMap(slice.length > 0 ? map : null);
 
-      if (!provider || slice.length < 2) return;
+    if (!provider || slice.length < 2) {
+      return;
+    }
 
-      const requestId = ++activeRouteRequestRef.current;
-      const path = await buildActiveRoadPath(provider, slice);
-      if (requestId !== activeRouteRequestRef.current) return;
+    const requestId = ++activeRouteRequestRef.current;
+    const path = await buildActiveRoadPath(provider, slice);
+    if (requestId !== activeRouteRequestRef.current) {
+      return;
+    }
 
-      line.setPath(path);
-      line.setMap(map);
-    },
-    [points],
-  );
+    line.setPath(path);
+    line.setMap(map);
+  }, []);
 
   const focusReading = useCallback(
     (index: number) => {
       const map = mapRef.current;
-      const point = points[index];
-      if (!map || !point) return;
-
-      const prev = index > 0 ? points[index - 1] : null;
-      const next = index < points.length - 1 ? points[index + 1] : null;
-      const focusPath = [prev, point, next]
-        .filter((item): item is DeviceLocation => item != null)
-        .map((item) => ({ lat: item.latitude, lng: item.longitude }));
+      const currentPoints = pointsRef.current;
+      const point = currentPoints[index];
+      if (!map || !point) {
+        return;
+      }
 
       updateMarkerStyles(index);
       void updateActiveRoute(index);
 
-      const padding = {
-        top: 56,
-        right: panelOpenRef.current ? PANEL_WIDTH + 24 : 48,
-        bottom: 48,
-        left: 48,
-      };
+      const padding = mapPadding(panelOpenRef.current);
+      const prev = index > 0 ? currentPoints[index - 1] : null;
+      const next = index < currentPoints.length - 1 ? currentPoints[index + 1] : null;
+      const focusPath = [prev, point, next]
+        .filter((item): item is DeviceLocation => item != null)
+        .map(toLatLng);
 
-      if (focusPath.length >= 2) {
-        const bounds = new google.maps.LatLngBounds();
-        focusPath.forEach((position) => bounds.extend(position));
-        map.fitBounds(bounds, padding);
-      } else {
-        map.panTo({ lat: point.latitude, lng: point.longitude });
-        if ((map.getZoom() ?? 0) < 15) {
-          map.setZoom(15);
-        }
-      }
+      focusMapOnSegment(map, focusPath, padding);
     },
-    [points, updateActiveRoute, updateMarkerStyles],
+    [updateActiveRoute, updateMarkerStyles],
   );
 
-  useEffect(() => {
-    setActiveIndex(0);
-    setPanelOpen(true);
-  }, [signature]);
+  const syncLiveView = useCallback(() => {
+    if (!liveRef.current || !mapRef.current) {
+      return;
+    }
+
+    const currentPoints = pointsRef.current;
+    if (currentPoints.length === 0) {
+      return;
+    }
+
+    const lastIndex = currentPoints.length - 1;
+    setActiveIndex(lastIndex);
+    focusReading(lastIndex);
+  }, [focusReading]);
+
+  syncLiveViewRef.current = syncLiveView;
 
   useEffect(() => {
-    if (!mapReady || loading || points.length === 0) return;
+    setPanelOpen(true);
+    prevPointsLengthRef.current = 0;
+    if (!live) {
+      setActiveIndex(0);
+    }
+  }, [resetKey, live]);
+
+  useEffect(() => {
+    if (!live || !mapReady || loading || points.length === 0) {
+      return;
+    }
+    syncLiveView();
+  }, [live, loading, mapReady, panelOpen, points.length, points.at(-1)?.id, syncLiveView]);
+
+  useEffect(() => {
+    if (live || !mapReady || loading || points.length === 0) {
+      return;
+    }
     focusReading(activeIndex);
-  }, [activeIndex, focusReading, loading, mapReady, panelOpen, points.length]);
+  }, [activeIndex, focusReading, live, loading, mapReady, panelOpen, points.length]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -180,15 +258,19 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
       overlaysRef.current = { routeLine: null, activeRouteLine: null, markers: [] };
     }
 
-    function destroyMap() {
+    function resetMapInstance() {
       clearOverlays();
       mapRef.current = null;
       routeProviderRef.current = null;
       activeRouteRequestRef.current += 1;
-      setMapReady(false);
       if (container) {
         container.replaceChildren();
       }
+    }
+
+    function destroyMap() {
+      resetMapInstance();
+      setMapReady(false);
     }
 
     if (!ready || !container || points.length === 0) {
@@ -208,61 +290,70 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
     setUsedFallback(false);
     setRouteWarning('');
 
-    const gpsPath = points.map((point) => ({
-      lat: point.latitude,
-      lng: point.longitude,
-    }));
-
     loadGoogleMaps(MAPS_KEY)
       .then(
-        async ({ Map, Polyline, LatLngBounds, AdvancedMarkerElement, Route, DirectionsService }) => {
+        async ({ Map, Polyline, LatLngBounds, AdvancedMarkerElement, Route }) => {
           if (cancelled || !containerRef.current) return;
 
-          const routeProvider = createRouteProvider(Route, DirectionsService);
-          routeProviderRef.current = routeProvider;
-          const routeResult = await buildRoadPath(routeProvider, gpsPath);
+          const currentPoints = pointsRef.current;
+          if (currentPoints.length === 0) return;
 
-          if (cancelled || !containerRef.current) return;
+          const currentGpsPath = currentPoints.map(toLatLng);
+          const isLive = liveRef.current;
 
-          setUsedFallback(routeResult.usedFallback);
-          setRouteWarning(
-            routeResult.warning && !routeResult.warning.includes('recusou')
-              ? routeResult.warning
-              : '',
-          );
-          setError(
-            routeResult.warning && routeResult.warning.includes('recusou')
-              ? routeResult.warning
-              : '',
-          );
+          routeProviderRef.current = createRouteProvider(Route);
 
-          clearOverlays();
+          let routePath = currentGpsPath;
+          let usedFallback = false;
+          let warning: string | undefined;
 
-          if (!mapRef.current) {
-            mapRef.current = new Map(containerRef.current, {
-              mapId: getGoogleMapId(),
-              center: routeResult.path[0],
-              zoom: 13,
-              mapTypeControl: false,
-              streetViewControl: false,
-              fullscreenControl: true,
-            });
+          if (isLive) {
+            usedFallback = true;
+          } else {
+            const routeResult = await buildRoadPath(routeProviderRef.current, currentGpsPath);
+            routePath = routeResult.path;
+            usedFallback = routeResult.usedFallback;
+            warning = routeResult.warning;
           }
 
+          if (cancelled || !containerRef.current) return;
+
+          setUsedFallback(usedFallback);
+          setRouteWarning(
+            warning && !warning.includes('recusou') ? warning : '',
+          );
+          setError(
+            warning && warning.includes('recusou') ? warning : '',
+          );
+
+          resetMapInstance();
+
+          const lastPoint = currentGpsPath[currentGpsPath.length - 1];
+          mapRef.current = new Map(containerRef.current, {
+            mapId: getGoogleMapId(),
+            center: lastPoint,
+            zoom: LIVE_ZOOM,
+            mapTypeControl: false,
+            streetViewControl: false,
+            fullscreenControl: true,
+          });
+
           const map = mapRef.current;
+          const lastIndex = currentPoints.length - 1;
+          const liveSegment = currentGpsPath.slice(Math.max(0, lastIndex - 1), lastIndex + 1);
 
           overlaysRef.current.routeLine = new Polyline({
-            path: routeResult.path,
+            path: routePath,
             geodesic: true,
             strokeColor: '#38bdf8',
-            strokeOpacity: 0.45,
-            strokeWeight: 4,
+            strokeOpacity: isLive ? 0.35 : 0.45,
+            strokeWeight: isLive ? 3 : 4,
             map,
             zIndex: 1,
           });
 
           overlaysRef.current.activeRouteLine = new Polyline({
-            path: gpsPath.slice(0, Math.min(2, gpsPath.length)),
+            path: liveSegment,
             geodesic: true,
             strokeColor: '#facc15',
             strokeOpacity: 1,
@@ -271,28 +362,39 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
             zIndex: 2,
           });
 
-          const markers: MarkerEntry[] = points.map((point, index) => {
+          overlaysRef.current.markers = currentPoints.map((point, index) => {
             const content = createReadingMarkerElement('default');
             const marker = new AdvancedMarkerElement({
               map,
-              position: { lat: point.latitude, lng: point.longitude },
+              position: toLatLng(point),
               content,
               zIndex: 1,
               title: `Leitura #${index + 1}`,
             });
 
             marker.addListener('click', () => {
-              setActiveIndex(index);
+              if (!liveRef.current) {
+                setActiveIndex(index);
+              }
             });
 
             return { marker, content };
           });
 
-          overlaysRef.current.markers = markers;
+          prevPointsLengthRef.current = currentPoints.length;
 
-          const bounds = new LatLngBounds();
-          routeResult.path.forEach((position) => bounds.extend(position));
-          map.fitBounds(bounds, 48);
+          if (isLive) {
+            setActiveIndex(lastIndex);
+            updateMarkerStyles(lastIndex);
+            focusMapOnSegment(map, liveSegment, mapPadding(panelOpenRef.current));
+            void updateActiveRoute(lastIndex);
+          } else {
+            const bounds = new LatLngBounds();
+            routePath.forEach((position) => bounds.extend(position));
+            map.fitBounds(bounds, 48);
+            setActiveIndex(0);
+            updateMarkerStyles(0);
+          }
 
           if (!cancelled) {
             setMapReady(true);
@@ -307,14 +409,84 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
       .finally(() => {
         if (!cancelled) {
           setLoading(false);
+          if (liveRef.current) {
+            window.setTimeout(() => syncLiveViewRef.current(), 0);
+          }
         }
       });
 
     return () => {
       cancelled = true;
-      clearOverlays();
+      destroyMap();
     };
-  }, [ready, signature]);
+  }, [live, ready, resetKey, updateActiveRoute, updateMarkerStyles]);
+
+  useEffect(() => {
+    if (!live || !mapReady || loading || points.length === 0) {
+      return;
+    }
+
+    const prevLength = prevPointsLengthRef.current;
+    if (points.length <= prevLength) {
+      return;
+    }
+
+    appendMapPoints(prevLength);
+    prevPointsLengthRef.current = points.length;
+    syncLiveView();
+  }, [live, loading, mapReady, points, syncLiveView]);
+
+  useEffect(() => {
+    if (live || !mapReady || loading || points.length === 0) {
+      return;
+    }
+
+    const prevLength = prevPointsLengthRef.current;
+    if (points.length <= prevLength) {
+      return;
+    }
+
+    appendMapPoints(prevLength);
+    prevPointsLengthRef.current = points.length;
+  }, [live, loading, mapReady, points]);
+
+  function appendMapPoints(fromIndex: number): void {
+    const map = mapRef.current;
+    const routeLine = overlaysRef.current.routeLine;
+    if (!map || !routeLine) {
+      return;
+    }
+
+    const AdvancedMarkerElement = google.maps.marker.AdvancedMarkerElement;
+    const routePath = routeLine
+      .getPath()
+      .getArray()
+      .map((position) => ({ lat: position.lat(), lng: position.lng() }));
+
+    for (let index = fromIndex; index < points.length; index += 1) {
+      const point = points[index];
+      routePath.push(toLatLng(point));
+
+      const content = createReadingMarkerElement('default');
+      const marker = new AdvancedMarkerElement({
+        map,
+        position: toLatLng(point),
+        content,
+        zIndex: 1,
+        title: `Leitura #${index + 1}`,
+      });
+
+      marker.addListener('click', () => {
+        if (!liveRef.current) {
+          setActiveIndex(index);
+        }
+      });
+
+      overlaysRef.current.markers.push({ marker, content });
+    }
+
+    routeLine.setPath(routePath);
+  }
 
   if (!MAPS_KEY) {
     return (
@@ -348,16 +520,19 @@ export function TrackingMap({ points, ready = true }: TrackingMapProps) {
     <div className="tracking-map-wrap">
       {loading ? (
         <p className="muted tracking-map-status">Traçando rota pelas ruas…</p>
+      ) : live ? (
+        <p className="muted tracking-map-status">
+          Modo ao vivo — último trecho entre as duas leituras mais recentes.
+        </p>
       ) : (
         <p className="muted tracking-map-status">
-          Clique em um ponto no mapa ou use o painel no canto. Setas do teclado também
-          funcionam.
+          Rota completa — clique nos pontos ou use o painel. Setas do teclado também funcionam.
         </p>
       )}
       {routeWarning && !error ? (
         <p className="muted tracking-map-status">{routeWarning}</p>
       ) : null}
-      {usedFallback && !routeWarning && !error ? (
+      {usedFallback && !routeWarning && !error && !live ? (
         <p className="muted tracking-map-status">
           Parte da rota foi desenhada em linha reta entre leituras.
         </p>
