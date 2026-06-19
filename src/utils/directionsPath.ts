@@ -1,4 +1,5 @@
 import { anchorPathToSnappedWaypoints, snapToRoads } from './roadsSnap';
+import { haversineMeters } from './geo';
 
 export type LatLng = { lat: number; lng: number };
 
@@ -18,6 +19,8 @@ type RouteClass = typeof google.maps.routes.Route;
 const ROUTE_TIMEOUT_MS = 20_000;
 /** Limite prático de waypoints na Routes API. */
 const MAX_ROUTE_WAYPOINTS = 25;
+/** Distância máxima (m) para estender rota até o marcador GPS real. */
+const GPS_ANCHOR_MAX_GAP_M = 250;
 
 export function isValidLatLng(
   point: LatLng | null | undefined,
@@ -31,6 +34,24 @@ export function isValidLatLng(
 
 export function filterValidLatLng(points: LatLng[]): LatLng[] {
   return points.filter(isValidLatLng);
+}
+
+export function ensurePathReaches(path: LatLng[], target: LatLng, maxGapM = 35): LatLng[] {
+  if (path.length === 0) {
+    return [{ ...target }];
+  }
+
+  const result = [...path];
+  const last = result[result.length - 1];
+  const gapM = haversineMeters(last.lat, last.lng, target.lat, target.lng);
+
+  if (gapM <= maxGapM) {
+    result[result.length - 1] = { ...target };
+    return result;
+  }
+
+  result.push({ ...target });
+  return result;
 }
 
 function decimateWaypoints(points: LatLng[], maxPoints: number): LatLng[] {
@@ -234,7 +255,12 @@ export async function resolveDisplayPath(
 
   const result = await buildRoadPath(provider, validPoints);
   if (result.path.length >= 2) {
-    return { path: result.path, usedRoads: true, warning: result.warning };
+    const lastTarget = validPoints[validPoints.length - 1];
+    return {
+      path: ensurePathReaches(result.path, lastTarget, GPS_ANCHOR_MAX_GAP_M),
+      usedRoads: true,
+      warning: result.warning,
+    };
   }
 
   return {

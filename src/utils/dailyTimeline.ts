@@ -323,3 +323,16 @@ export function segmentPoints(
     .slice(segment.startIndex, segment.endIndex + 1)
     .filter(isValidReading);
 }
+
+/** Pontos do trecho para desenho no mapa (inclui leituras descartadas da rota). */
+export function segmentPathPoints(
+  locations: DeviceLocation[],
+  segment: TimelineSegment,
+): DeviceLocation[] {
+  return locations
+    .slice(segment.startIndex, segment.endIndex + 1)
+    .filter(
+      (point) =>
+        Number.isFinite(point.latitude) && Number.isFinite(point.longitude),
+    );
+}

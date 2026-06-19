@@ -88,6 +88,7 @@ export type AccountDevice = {
   order_id?: string;
   emergency_until?: string | null;
   emergency_active?: boolean;
+  emergency_remaining_sec?: number;
 };
 
 export type DeviceLocation = {

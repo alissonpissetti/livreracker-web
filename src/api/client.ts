@@ -215,12 +215,14 @@ export function updateDevice(
 
 export function getDeviceLocations(
   deviceSlotId: string,
-  params?: { from?: string; to?: string; limit?: number },
+  params?: { from?: string; to?: string; since?: string; limit?: number; full?: boolean },
 ) {
   const search = new URLSearchParams();
   if (params?.from) search.set('from', params.from);
   if (params?.to) search.set('to', params.to);
+  if (params?.since) search.set('since', params.since);
   if (params?.limit) search.set('limit', String(params.limit));
+  if (params?.full) search.set('full', 'true');
   const query = search.toString();
   return api<DeviceLocationsResponse>(
     `/v1/account/devices/${deviceSlotId}/locations${query ? `?${query}` : ''}`,
@@ -237,6 +239,7 @@ export function renewDevice(deviceSlotId: string) {
 export function activateDeviceEmergency(deviceSlotId: string) {
   return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}/emergency`, {
     method: 'POST',
+    body: JSON.stringify({}),
   });
 }
 

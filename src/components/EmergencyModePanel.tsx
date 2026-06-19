@@ -13,10 +13,26 @@ type EmergencyModePanelProps = {
   onDeviceChange: (device: AccountDevice) => void;
 };
 
+const EMERGENCY_DURATION_SEC = 30 * 60;
+
 function formatCountdown(totalSec: number): string {
-  const minutes = Math.floor(totalSec / 60);
-  const seconds = totalSec % 60;
+  const capped = Math.min(Math.max(0, totalSec), EMERGENCY_DURATION_SEC);
+  const minutes = Math.floor(capped / 60);
+  const seconds = capped % 60;
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function hasEmergencyTimeLeft(device: AccountDevice): boolean {
+  const serverRemaining = device.emergency_remaining_sec ?? 0;
+  if (serverRemaining > 0) {
+    return true;
+  }
+
+  if (!device.emergency_until) {
+    return false;
+  }
+
+  return new Date(device.emergency_until).getTime() > Date.now();
 }
 
 export function EmergencyModePanel({
@@ -26,37 +42,54 @@ export function EmergencyModePanel({
   onDeviceChange,
 }: EmergencyModePanelProps) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const expiresAtRef = useRef<number | null>(null);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [remainingSec, setRemainingSec] = useState(0);
 
-  const isActive = device.emergency_active && !!device.emergency_until;
+  const serverActive = Boolean(device.emergency_active);
+  const isActive = serverActive && (remainingSec > 0 || hasEmergencyTimeLeft(device));
 
   useEffect(() => {
-    if (!isActive || !device.emergency_until) {
+    if (!serverActive) {
+      expiresAtRef.current = null;
       setRemainingSec(0);
       return;
     }
 
+    const serverRemaining = device.emergency_remaining_sec ?? 0;
+    if (serverRemaining > 0) {
+      expiresAtRef.current = Date.now() + serverRemaining * 1000;
+    } else if (device.emergency_until) {
+      expiresAtRef.current = new Date(device.emergency_until).getTime();
+    } else {
+      expiresAtRef.current = Date.now() + EMERGENCY_DURATION_SEC * 1000;
+    }
+
     function tick() {
-      const ms = new Date(device.emergency_until!).getTime() - Date.now();
-      setRemainingSec(Math.max(0, Math.ceil(ms / 1000)));
+      if (!expiresAtRef.current) {
+        setRemainingSec(0);
+        return;
+      }
+
+      const sec = Math.max(0, Math.ceil((expiresAtRef.current - Date.now()) / 1000));
+      setRemainingSec(Math.min(sec, EMERGENCY_DURATION_SEC));
     }
 
     tick();
     const timer = window.setInterval(tick, 1000);
     return () => window.clearInterval(timer);
-  }, [device.emergency_until, isActive]);
+  }, [serverActive, device.emergency_remaining_sec, device.emergency_until]);
 
   useEffect(() => {
-    if (isActive && remainingSec === 0) {
+    if (serverActive && remainingSec === 0 && !hasEmergencyTimeLeft(device)) {
       void refreshDeviceState();
     }
-  }, [isActive, remainingSec]);
+  }, [serverActive, remainingSec, device.emergency_remaining_sec, device.emergency_until]);
 
   useEffect(() => {
-    if (!isActive) {
+    if (!serverActive) {
       return;
     }
 
@@ -65,7 +98,7 @@ export function EmergencyModePanel({
     }, 10_000);
 
     return () => window.clearInterval(timer);
-  }, [deviceSlotId, isActive]);
+  }, [deviceSlotId, serverActive]);
 
   useEffect(() => {
     if (!open) {
@@ -114,6 +147,7 @@ export function EmergencyModePanel({
       setOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Erro ao ativar emergência');
+      setOpen(true);
     } finally {
       setLoading(false);
     }
@@ -152,6 +186,7 @@ export function EmergencyModePanel({
             {loading ? 'Encerrando…' : 'Encerrar'}
           </button>
         </div>
+        {error ? <p className="error-text emergency-mode-error">{error}</p> : null}
       </div>
     );
   }
@@ -161,13 +196,15 @@ export function EmergencyModePanel({
       <button
         type="button"
         className={`emergency-mode-trigger${open ? ' emergency-mode-trigger-open' : ''}`}
-        disabled={disabled}
+        disabled={disabled || loading}
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => setOpen((current) => !current)}
       >
         Emergência
       </button>
+
+      {error && !open ? <p className="error-text emergency-mode-error">{error}</p> : null}
 
       {open ? (
         <div className="emergency-mode-popover card" role="dialog" aria-label="Modo emergência">

@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DeviceLocation } from '../types';
 import type { TimelineSegment } from '../utils/dailyTimeline';
-import { segmentPoints } from '../utils/dailyTimeline';
+import { segmentPathPoints } from '../utils/dailyTimeline';
 import {
   createRouteProvider,
+  ensurePathReaches,
   resolveDisplayPath,
   type LatLng,
   type RouteProvider,
 } from '../utils/directionsPath';
 import { getGoogleMapId, loadGoogleMaps } from '../utils/googleMaps';
-import { isValidReading, lastValidPointIndex, validRoutePoints, effectiveCoordinate } from '../utils/locationOutliers';
+import { haversineMeters } from '../utils/geo';
+import { isValidReading, validRoutePoints, effectiveCoordinate } from '../utils/locationOutliers';
 import {
   markerRoleForIndex,
   markerZIndex,
@@ -41,6 +43,10 @@ type TrackingMapProps = {
 
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? '';
 const LIVE_ZOOM = 16;
+const LIVE_ROUTE_LIGHT = '#fca5a5';
+const LIVE_ROUTE_DARK = '#991b1b';
+const MAX_LIVE_ROUTE_POINTS = 20;
+const GPS_ANCHOR_MAX_GAP_M = 250;
 
 function isValidLocation(point: DeviceLocation): boolean {
   return Number.isFinite(point.latitude) && Number.isFinite(point.longitude);
@@ -53,6 +59,109 @@ function toLatLng(point: DeviceLocation): LatLng {
 
 function pointsToPath(points: DeviceLocation[]): LatLng[] {
   return points.filter(isValidLocation).map(toLatLng);
+}
+
+function lastMoveSegment(segments: TimelineSegment[]): TimelineSegment | null {
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (segments[index].kind === 'move') {
+      return segments[index];
+    }
+  }
+  return null;
+}
+
+function appendUniquePoints(
+  base: DeviceLocation[],
+  extra: DeviceLocation[],
+): DeviceLocation[] {
+  if (extra.length === 0) {
+    return base;
+  }
+
+  const seen = new Set(base.map((point) => point.id));
+  const merged = [...base];
+  for (const point of extra) {
+    if (!seen.has(point.id)) {
+      merged.push(point);
+      seen.add(point.id);
+    }
+  }
+  return merged;
+}
+
+function segmentDisplayPoints(
+  currentPoints: DeviceLocation[],
+  segment: TimelineSegment,
+  extraTail: DeviceLocation[] = [],
+): DeviceLocation[] {
+  return appendUniquePoints(segmentPathPoints(currentPoints, segment), extraTail);
+}
+
+function stopAnchorLatLng(
+  stop: TimelineSegment,
+  currentPoints: DeviceLocation[],
+): LatLng {
+  const stopPoints = segmentPathPoints(currentPoints, stop);
+  const lastStopReading = stopPoints.at(-1);
+  if (lastStopReading) {
+    return toLatLng(lastStopReading);
+  }
+  return { lat: stop.centroidLat, lng: stop.centroidLng };
+}
+
+/** Deslocamento + leituras da parada seguinte (a linha do tempo separa os dois). */
+function moveSegmentDisplayPoints(
+  currentPoints: DeviceLocation[],
+  segment: TimelineSegment,
+  segmentIndex: number,
+  segments: TimelineSegment[],
+  extraTail: DeviceLocation[] = [],
+): DeviceLocation[] {
+  let display = segmentDisplayPoints(currentPoints, segment, extraTail);
+  const next = segments[segmentIndex + 1];
+  if (next?.kind === 'stop') {
+    display = appendUniquePoints(display, segmentPathPoints(currentPoints, next));
+  }
+  return display;
+}
+
+function buildSegmentRouteInput(displayPoints: DeviceLocation[]): {
+  gpsFallback: LatLng[];
+  roadPath: LatLng[];
+  anchor?: LatLng;
+} {
+  const gpsFallback = pointsToPath(displayPoints);
+  const validPoints = displayPoints.filter(isValidReading);
+  const roadSource = validPoints.length >= 2 ? validPoints : displayPoints;
+  return {
+    gpsFallback,
+    roadPath: pointsToPath(roadSource),
+    anchor: gpsFallback.at(-1),
+  };
+}
+
+function tailPathPoints(
+  points: DeviceLocation[],
+  segments: TimelineSegment[],
+): DeviceLocation[] {
+  if (segments.length === 0) {
+    return points.filter(isValidLocation);
+  }
+
+  const maxEnd = Math.max(...segments.map((segment) => segment.endIndex));
+  return points.slice(maxEnd + 1).filter(isValidLocation);
+}
+
+function liveRoutePoints(points: DeviceLocation[]): DeviceLocation[] {
+  const located = points.filter(isValidLocation);
+  if (located.length <= MAX_LIVE_ROUTE_POINTS) {
+    return located;
+  }
+  return located.slice(-MAX_LIVE_ROUTE_POINTS);
+}
+
+function liveValidRoutePoints(points: DeviceLocation[]): DeviceLocation[] {
+  return liveRoutePoints(points).filter(isValidReading);
 }
 
 function fitMapToPoints(map: google.maps.Map, path: LatLng[]): void {
@@ -102,16 +211,17 @@ export function TrackingMap({
   const onValidPointSelectRef = useRef(onValidPointSelect);
   onValidPointSelectRef.current = onValidPointSelect;
   const routeLineRef = useRef<google.maps.Polyline | null>(null);
+  const liveBackgroundLineRef = useRef<google.maps.Polyline | null>(null);
   const backgroundLinesRef = useRef<google.maps.Polyline[]>([]);
   const stopMarkersRef = useRef<google.maps.Marker[]>([]);
   const drawTokenRef = useRef(0);
+  const liveFitDoneRef = useRef(false);
 
   const [loading, setLoading] = useState(false);
   const [mapReady, setMapReady] = useState(false);
   const [error, setError] = useState('');
   const [routeNote, setRouteNote] = useState('');
 
-  const pointsKey = `${points.length}:${points.at(-1)?.id ?? 'none'}`;
   const segmentsKey = segments.map((segment) => segment.id).join('|');
   const validPoints = useMemo(() => validRoutePoints(points), [points]);
   const activeValidIndex =
@@ -123,8 +233,15 @@ export function TrackingMap({
       : null;
 
   function updateMarkerStyles(activeIndex: number | null): void {
-    const total = markersRef.current.length;
+    const validEntries = markersRef.current.filter((entry) => entry.validIndex >= 0);
+    const total = validEntries.length;
     for (const entry of markersRef.current) {
+      if (entry.validIndex < 0) {
+        entry.marker.setIcon(readingMarkerIcon(google.maps.SymbolPath, 'outlier'));
+        entry.marker.setZIndex(markerZIndex('outlier'));
+        continue;
+      }
+
       const role =
         activeIndex == null
           ? 'default'
@@ -134,14 +251,247 @@ export function TrackingMap({
     }
   }
 
-  function clearDynamicLayers(): void {
+  function clearBackgroundLayers(clearLiveBackground = true): void {
+    if (clearLiveBackground) {
+      liveBackgroundLineRef.current?.setPath([]);
+    }
     backgroundLinesRef.current.forEach((line) => line.setMap(null));
     backgroundLinesRef.current = [];
     stopMarkersRef.current.forEach((marker) => {
       marker.setMap(null);
     });
     stopMarkersRef.current = [];
+  }
+
+  function clearDynamicLayers(clearLiveBackground = true): void {
+    clearBackgroundLayers(clearLiveBackground);
     routeLineRef.current?.setPath([]);
+  }
+
+  function syncMarkers(map: google.maps.Map): void {
+    markersRef.current.forEach((entry) => {
+      entry.marker.setMap(null);
+    });
+    markersRef.current = [];
+
+    let validIndex = 0;
+    for (const point of points) {
+      if (!isValidLocation(point)) {
+        continue;
+      }
+
+      const markerRole = isValidReading(point) ? 'default' : 'outlier';
+      const marker = new google.maps.Marker({
+        map,
+        position: toLatLng(point),
+        icon: readingMarkerIcon(google.maps.SymbolPath, markerRole),
+        zIndex: markerZIndex(markerRole),
+      });
+      if (isValidReading(point)) {
+        const capturedIndex = validIndex;
+        marker.addListener('click', () => {
+          if (!live) {
+            onValidPointSelectRef.current?.(capturedIndex);
+          }
+        });
+        markersRef.current.push({ marker, validIndex: capturedIndex });
+        validIndex += 1;
+      } else {
+        markersRef.current.push({ marker, validIndex: -1 });
+      }
+    }
+  }
+
+  function setLiveBackgroundPath(map: google.maps.Map, path: LatLng[]): void {
+    if (path.length < 2) {
+      liveBackgroundLineRef.current?.setPath([]);
+      return;
+    }
+
+    if (!liveBackgroundLineRef.current) {
+      liveBackgroundLineRef.current = new google.maps.Polyline({
+        map,
+        path,
+        geodesic: true,
+        strokeColor: LIVE_ROUTE_LIGHT,
+        strokeOpacity: 0.95,
+        strokeWeight: 6,
+        zIndex: 10,
+      });
+      return;
+    }
+
+    liveBackgroundLineRef.current.setOptions({
+      strokeColor: LIVE_ROUTE_LIGHT,
+      strokeOpacity: 0.95,
+      strokeWeight: 6,
+      zIndex: 10,
+    });
+    liveBackgroundLineRef.current.setPath(path);
+    liveBackgroundLineRef.current.setMap(map);
+  }
+
+  async function drawRoadPath(
+    provider: RouteProvider,
+    path: LatLng[],
+    anchor?: LatLng,
+  ): Promise<{ path: LatLng[]; warning?: string }> {
+    if (path.length < 2) {
+      return { path };
+    }
+
+    const resolved = await resolveDisplayPath(provider, path);
+    const target = anchor ?? path[path.length - 1];
+    return {
+      path: ensurePathReaches(resolved.path, target, GPS_ANCHOR_MAX_GAP_M),
+      warning: resolved.warning,
+    };
+  }
+
+  async function extendLineToStop(
+    provider: RouteProvider | null,
+    line: google.maps.Polyline,
+    stop: TimelineSegment,
+    currentPoints: DeviceLocation[],
+    token: number,
+  ): Promise<string | undefined> {
+    if (!provider) {
+      return undefined;
+    }
+
+    const path = line.getPath();
+    if (!path || path.getLength() < 1) {
+      return undefined;
+    }
+
+    const last = path.getAt(path.getLength() - 1);
+    if (!last) {
+      return undefined;
+    }
+
+    const from = { lat: last.lat(), lng: last.lng() };
+    const target = stopAnchorLatLng(stop, currentPoints);
+    const gap = haversineMeters(from.lat, from.lng, target.lat, target.lng);
+    if (gap <= 20) {
+      const merged: LatLng[] = [];
+      for (let index = 0; index < path.getLength() - 1; index += 1) {
+        const point = path.getAt(index);
+        if (point) {
+          merged.push({ lat: point.lat(), lng: point.lng() });
+        }
+      }
+      merged.push(target);
+      line.setPath(merged);
+      return undefined;
+    }
+
+    const resolved = await drawRoadPath(provider, [from, target], target);
+    if (token !== drawTokenRef.current || resolved.path.length < 2) {
+      return resolved.warning;
+    }
+
+    const merged: LatLng[] = [];
+    for (let index = 0; index < path.getLength() - 1; index += 1) {
+      const point = path.getAt(index);
+      if (point) {
+        merged.push({ lat: point.lat(), lng: point.lng() });
+      }
+    }
+    merged.push(...resolved.path.slice(1));
+    line.setPath(merged);
+    return resolved.warning;
+  }
+
+  async function applySegmentRoadLine(
+    provider: RouteProvider | null,
+    line: google.maps.Polyline,
+    displayPoints: DeviceLocation[],
+    token: number,
+  ): Promise<{ path: LatLng[]; warning?: string }> {
+    const { gpsFallback, roadPath, anchor } = buildSegmentRouteInput(displayPoints);
+    if (gpsFallback.length < 2) {
+      return { path: gpsFallback };
+    }
+
+    line.setPath(gpsFallback);
+
+    if (!provider || roadPath.length < 2) {
+      return { path: gpsFallback };
+    }
+
+    const resolved = await drawRoadPath(provider, roadPath, anchor);
+    if (token !== drawTokenRef.current) {
+      return { path: gpsFallback };
+    }
+
+    if (resolved.path.length >= 2) {
+      line.setPath(resolved.path);
+      return { path: resolved.path, warning: resolved.warning };
+    }
+
+    return { path: gpsFallback, warning: resolved.warning };
+  }
+
+  async function finalizeHistoryLastReading(
+    provider: RouteProvider | null,
+    currentPoints: DeviceLocation[],
+    currentSegments: TimelineSegment[],
+    lastMove: TimelineSegment | null,
+    tailPoints: DeviceLocation[],
+    segmentLines: Map<string, google.maps.Polyline>,
+    token: number,
+  ): Promise<string | undefined> {
+    if (!provider || !lastMove) {
+      return undefined;
+    }
+
+    const line = segmentLines.get(lastMove.id);
+    if (!line) {
+      return undefined;
+    }
+
+    const moveIndex = currentSegments.findIndex((segment) => segment.id === lastMove.id);
+    const displayPoints = moveSegmentDisplayPoints(
+      currentPoints,
+      lastMove,
+      moveIndex,
+      currentSegments,
+      tailPoints,
+    );
+    const lastReading = displayPoints.filter(isValidLocation).at(-1);
+    if (!lastReading || displayPoints.length < 2) {
+      return undefined;
+    }
+
+    const validRoute = displayPoints.filter(isValidReading);
+    let roadPath = pointsToPath(validRoute);
+    let lastReadingLatLng = toLatLng(lastReading);
+
+    const nextStop = currentSegments[moveIndex + 1];
+    if (nextStop?.kind === 'stop') {
+      lastReadingLatLng = stopAnchorLatLng(nextStop, currentPoints);
+    }
+
+    if (roadPath.length < 2) {
+      roadPath = pointsToPath(displayPoints.filter(isValidLocation).slice(-2));
+    }
+
+    if (roadPath.length < 2) {
+      return undefined;
+    }
+
+    const resolved = await drawRoadPath(provider, roadPath, lastReadingLatLng);
+    if (token !== drawTokenRef.current || resolved.path.length < 2) {
+      return resolved.warning;
+    }
+
+    line.setPath(resolved.path);
+
+    if (nextStop?.kind === 'stop') {
+      return extendLineToStop(provider, line, nextStop, currentPoints, token);
+    }
+
+    return resolved.warning;
   }
 
   function setMainRoute(map: google.maps.Map, path: LatLng[], color: string): void {
@@ -195,8 +545,13 @@ export function TrackingMap({
       return;
     }
     if (resolved.path.length >= 2) {
-      setMainRoute(map, resolved.path, '#dc2626');
-      fitMapToPoints(map, resolved.path);
+      const displayPath = ensurePathReaches(
+        resolved.path,
+        path[path.length - 1],
+        GPS_ANCHOR_MAX_GAP_M,
+      );
+      setMainRoute(map, displayPath, '#dc2626');
+      fitMapToPoints(map, displayPath);
     }
     if (resolved.warning) {
       setRouteNote(resolved.warning);
@@ -216,9 +571,14 @@ export function TrackingMap({
     setRouteNote('');
 
     const focusSegment = currentSegments.find((segment) => segment.id === focusSegmentId);
+    const tailPoints = tailPathPoints(currentPoints, currentSegments);
+    const lastMove = lastMoveSegment(currentSegments);
+    const segmentLines = new Map<string, google.maps.Polyline>();
     let focusPath: LatLng[] = [];
+    let routeWarning: string | undefined;
 
-    for (const segment of currentSegments) {
+    for (let segmentIndex = 0; segmentIndex < currentSegments.length; segmentIndex += 1) {
+      const segment = currentSegments[segmentIndex];
       if (segment.kind === 'stop') {
         const marker = new google.maps.Marker({
           map,
@@ -230,19 +590,23 @@ export function TrackingMap({
         continue;
       }
 
-      const path = pointsToPath(segmentPoints(currentPoints, segment));
-      if (path.length < 2) {
+      const extraTail = segment.id === lastMove?.id ? tailPoints : [];
+      const displayPoints = moveSegmentDisplayPoints(
+        currentPoints,
+        segment,
+        segmentIndex,
+        currentSegments,
+        extraTail,
+      );
+      const { gpsFallback } = buildSegmentRouteInput(displayPoints);
+      if (gpsFallback.length < 2) {
         continue;
       }
 
       const isFocused = segment.id === focusSegmentId;
-      if (isFocused) {
-        focusPath = path;
-      }
-
       const line = new google.maps.Polyline({
         map,
-        path,
+        path: gpsFallback,
         geodesic: true,
         strokeColor: segment.color,
         strokeOpacity: 1,
@@ -250,29 +614,211 @@ export function TrackingMap({
         zIndex: isFocused ? 1000 : 10,
       });
       backgroundLinesRef.current.push(line);
+      segmentLines.set(segment.id, line);
 
-      if (!provider || token !== drawTokenRef.current) {
-        continue;
+      if (isFocused) {
+        focusPath = gpsFallback;
       }
 
-      void resolveDisplayPath(provider, path).then((resolved) => {
-        if (token !== drawTokenRef.current || resolved.path.length < 2) {
-          return;
+      const resolved = await applySegmentRoadLine(provider, line, displayPoints, token);
+      if (token !== drawTokenRef.current) {
+        return;
+      }
+
+      const nextStop = currentSegments[segmentIndex + 1];
+      if (nextStop?.kind === 'stop') {
+        const stopWarning = await extendLineToStop(
+          provider,
+          line,
+          nextStop,
+          currentPoints,
+          token,
+        );
+        if (!routeWarning && stopWarning) {
+          routeWarning = stopWarning;
         }
-        line.setPath(resolved.path);
-        if (isFocused) {
-          focusPath = resolved.path;
-          fitMapToPoints(map, focusPath);
+      }
+
+      if (isFocused && resolved.path.length >= 2) {
+        focusPath = [];
+        const path = line.getPath();
+        if (path) {
+          for (let index = 0; index < path.getLength(); index += 1) {
+            const point = path.getAt(index);
+            if (point) {
+              focusPath.push({ lat: point.lat(), lng: point.lng() });
+            }
+          }
         }
-      });
+      }
+      if (!routeWarning && resolved.warning) {
+        routeWarning = resolved.warning;
+      }
+    }
+
+    const finalizeWarning = await finalizeHistoryLastReading(
+      provider,
+      currentPoints,
+      currentSegments,
+      lastMove,
+      tailPoints,
+      segmentLines,
+      token,
+    );
+    if (token !== drawTokenRef.current) {
+      return;
+    }
+
+    if (!routeWarning && finalizeWarning) {
+      routeWarning = finalizeWarning;
+    }
+
+    if (lastMove && focusSegmentId === lastMove.id) {
+      const lastLine = segmentLines.get(lastMove.id);
+      const lastPath = lastLine?.getPath();
+      if (lastPath && lastPath.getLength() >= 2) {
+        focusPath = [];
+        for (let index = 0; index < lastPath.getLength(); index += 1) {
+          const point = lastPath.getAt(index);
+          if (point) {
+            focusPath.push({ lat: point.lat(), lng: point.lng() });
+          }
+        }
+      }
+    }
+
+    if (routeWarning) {
+      setRouteNote(routeWarning);
     }
 
     if (focusSegment?.kind === 'stop') {
-      fitMapToPoints(map, [{ lat: focusSegment.centroidLat, lng: focusSegment.centroidLng }]);
+      const stopIndex = currentSegments.findIndex((segment) => segment.id === focusSegment.id);
+      const prevMove = stopIndex > 0 ? currentSegments[stopIndex - 1] : null;
+      const prevLine = prevMove?.kind === 'move' ? segmentLines.get(prevMove.id) : null;
+      const prevPath = prevLine?.getPath();
+      if (prevPath && prevPath.getLength() >= 2) {
+        const boundsPath: LatLng[] = [];
+        for (let index = 0; index < prevPath.getLength(); index += 1) {
+          const point = prevPath.getAt(index);
+          if (point) {
+            boundsPath.push({ lat: point.lat(), lng: point.lng() });
+          }
+        }
+        boundsPath.push(stopAnchorLatLng(focusSegment, currentPoints));
+        fitMapToPoints(map, boundsPath);
+      } else {
+        fitMapToPoints(map, [{ lat: focusSegment.centroidLat, lng: focusSegment.centroidLng }]);
+      }
     } else if (focusPath.length >= 2) {
       fitMapToPoints(map, focusPath);
     } else {
       fitMapToPoints(map, pointsToPath(validRoutePoints(currentPoints)));
+    }
+  }
+
+  async function drawLiveRoute(
+    map: google.maps.Map,
+    provider: RouteProvider | null,
+    currentPoints: DeviceLocation[],
+    token: number,
+  ): Promise<void> {
+    updateMarkerStyles(null);
+    setRouteNote('');
+
+    const routePoints = liveRoutePoints(currentPoints);
+    const validRoute = liveValidRoutePoints(currentPoints);
+    const fullGpsPath = pointsToPath(routePoints);
+    const validPath = pointsToPath(validRoute);
+    const lastReading = routePoints.at(-1);
+    const lastReadingLatLng = lastReading ? toLatLng(lastReading) : undefined;
+
+    const lastValidPair = validRoute.length >= 2 ? validRoute.slice(-2) : [];
+    const lastValidPath = pointsToPath(lastValidPair);
+
+    if (fullGpsPath.length >= 2) {
+      setLiveBackgroundPath(map, fullGpsPath);
+    } else {
+      liveBackgroundLineRef.current?.setPath([]);
+    }
+
+    if (lastValidPath.length >= 2) {
+      setMainRoute(map, lastValidPath, LIVE_ROUTE_DARK);
+    } else {
+      routeLineRef.current?.setPath([]);
+    }
+
+    const current = routePoints.at(-1) ?? currentPoints.filter(isValidLocation).at(-1);
+
+    if (current && isValidLocation(current)) {
+      if (!liveFitDoneRef.current) {
+        if (fullGpsPath.length >= 2) {
+          fitMapToPoints(map, fullGpsPath);
+        } else {
+          map.setCenter(toLatLng(current));
+          map.setZoom(LIVE_ZOOM);
+        }
+        liveFitDoneRef.current = true;
+      } else {
+        map.panTo(toLatLng(current));
+      }
+    } else if (fullGpsPath.length >= 2 && !liveFitDoneRef.current) {
+      fitMapToPoints(map, fullGpsPath);
+      liveFitDoneRef.current = true;
+    }
+
+    if (!provider) {
+      return;
+    }
+
+    if (validPath.length >= 2) {
+      const resolved = await drawRoadPath(
+        provider,
+        validPath,
+        lastReadingLatLng ?? validPath[validPath.length - 1],
+      );
+      if (token !== drawTokenRef.current) {
+        return;
+      }
+      if (resolved.path.length >= 2) {
+        setLiveBackgroundPath(map, resolved.path);
+      }
+      if (resolved.warning) {
+        setRouteNote(resolved.warning);
+      }
+    }
+
+    if (lastValidPath.length >= 2) {
+      const resolved = await drawRoadPath(
+        provider,
+        lastValidPath,
+        lastReadingLatLng ?? lastValidPath[lastValidPath.length - 1],
+      );
+      if (token !== drawTokenRef.current) {
+        return;
+      }
+      if (resolved.path.length >= 2) {
+        setMainRoute(map, resolved.path, LIVE_ROUTE_DARK);
+      }
+    } else if (lastReadingLatLng && validPath.length >= 2) {
+      const anchorPath = validPath.slice(-2);
+      if (anchorPath.length >= 2) {
+        const anchorGap = haversineMeters(
+          anchorPath[0].lat,
+          anchorPath[0].lng,
+          lastReadingLatLng.lat,
+          lastReadingLatLng.lng,
+        );
+        if (anchorGap > 40) {
+          const resolved = await drawRoadPath(
+            provider,
+            [anchorPath[0], lastReadingLatLng],
+            lastReadingLatLng,
+          );
+          if (token === drawTokenRef.current && resolved.path.length >= 2) {
+            setMainRoute(map, resolved.path, LIVE_ROUTE_DARK);
+          }
+        }
+      }
     }
   }
 
@@ -285,10 +831,17 @@ export function TrackingMap({
     isLive: boolean,
   ): Promise<void> {
     const token = ++drawTokenRef.current;
-    clearDynamicLayers();
     setRouteNote('');
 
-    if (!isLive && activeValidIndex != null) {
+    if (isLive) {
+      clearBackgroundLayers(false);
+      await drawLiveRoute(map, provider, currentPoints, token);
+      return;
+    }
+
+    clearDynamicLayers(true);
+
+    if (activeValidIndex != null) {
       await drawPointExplorer(map, provider, validPoints, activeValidIndex);
       return;
     }
@@ -297,43 +850,6 @@ export function TrackingMap({
 
     if (showFullDayRoute) {
       await drawFullDayRoute(map, provider, currentPoints, currentSegments, segmentId);
-      return;
-    }
-
-    if (isLive) {
-      const lastIndex = lastValidPointIndex(currentPoints);
-      let prev: DeviceLocation | null = null;
-      for (let index = lastIndex - 1; index >= 0; index -= 1) {
-        if (isValidReading(currentPoints[index]) && isValidLocation(currentPoints[index])) {
-          prev = currentPoints[index];
-          break;
-        }
-      }
-      const current = currentPoints[lastIndex];
-      if (!prev || !current || !isValidLocation(current)) {
-        fitMapToPoints(map, pointsToPath(currentPoints));
-        return;
-      }
-
-      const path = [toLatLng(prev), toLatLng(current)];
-      setMainRoute(map, path, '#dc2626');
-      fitMapToPoints(map, path);
-
-      if (!provider || token !== drawTokenRef.current) {
-        return;
-      }
-
-      const resolved = await resolveDisplayPath(provider, path);
-      if (token !== drawTokenRef.current) {
-        return;
-      }
-      if (resolved.path.length >= 2) {
-        setMainRoute(map, resolved.path, '#dc2626');
-        fitMapToPoints(map, resolved.path);
-      }
-      if (resolved.warning) {
-        setRouteNote(resolved.warning);
-      }
       return;
     }
 
@@ -351,7 +867,7 @@ export function TrackingMap({
         continue;
       }
 
-      const path = pointsToPath(segmentPoints(currentPoints, segment));
+      const path = pointsToPath(segmentPathPoints(currentPoints, segment));
       if (path.length < 2) {
         continue;
       }
@@ -383,7 +899,21 @@ export function TrackingMap({
       return;
     }
 
-    const mainPath = pointsToPath(segmentPoints(currentPoints, selected));
+    const selectedIndex = currentSegments.findIndex((segment) => segment.id === selected.id);
+    const lastMove = lastMoveSegment(currentSegments);
+    const extraTail =
+      selected.id === lastMove?.id ? tailPathPoints(currentPoints, currentSegments) : [];
+    const displayPoints =
+      selected.kind === 'move'
+        ? moveSegmentDisplayPoints(
+            currentPoints,
+            selected,
+            selectedIndex,
+            currentSegments,
+            extraTail,
+          )
+        : segmentDisplayPoints(currentPoints, selected, extraTail);
+    const mainPath = pointsToPath(displayPoints);
     if (mainPath.length < 2) {
       fitMapToPoints(map, pointsToPath(currentPoints));
       return;
@@ -396,7 +926,16 @@ export function TrackingMap({
       return;
     }
 
-    const resolved = await resolveDisplayPath(provider, mainPath);
+    const { roadPath, anchor } = buildSegmentRouteInput(displayPoints);
+    const routeAnchor =
+      currentSegments[selectedIndex + 1]?.kind === 'stop'
+        ? stopAnchorLatLng(currentSegments[selectedIndex + 1], currentPoints)
+        : anchor;
+    if (roadPath.length < 2) {
+      return;
+    }
+
+    const resolved = await drawRoadPath(provider, roadPath, routeAnchor);
     if (token !== drawTokenRef.current) {
       return;
     }
@@ -452,39 +991,39 @@ export function TrackingMap({
 
         mapRef.current = map;
         providerRef.current = createRouteProvider(Route, MAPS_KEY);
+        liveFitDoneRef.current = false;
 
-        let validIndex = 0;
-        for (const point of points) {
-          if (!isValidLocation(point) || !isValidReading(point)) {
-            continue;
-          }
-          const marker = new google.maps.Marker({
-            map,
-            position: toLatLng(point),
-            icon: readingMarkerIcon(google.maps.SymbolPath, 'default'),
-            zIndex: markerZIndex('default'),
-          });
-          const capturedIndex = validIndex;
-          marker.addListener('click', () => {
-            if (!live) {
-              onValidPointSelectRef.current?.(capturedIndex);
-            }
-          });
-          markersRef.current.push({ marker, validIndex: capturedIndex });
-          validIndex += 1;
-        }
+        syncMarkers(map);
 
         routeLineRef.current = new Polyline({
           map,
           path: [],
           geodesic: true,
-          strokeColor: '#dc2626',
+          strokeColor: LIVE_ROUTE_DARK,
           strokeOpacity: 1,
           strokeWeight: 8,
           zIndex: 1000,
         });
 
-        fitMapToPoints(map, pointsToPath(validRoutePoints(points)));
+        liveBackgroundLineRef.current = new google.maps.Polyline({
+          map,
+          path: [],
+          geodesic: true,
+          strokeColor: LIVE_ROUTE_LIGHT,
+          strokeOpacity: 0.95,
+          strokeWeight: 6,
+          zIndex: 10,
+        });
+
+        if (live) {
+          const seedPath = pointsToPath(liveRoutePoints(points));
+          if (seedPath.length >= 2) {
+            fitMapToPoints(map, seedPath);
+            liveFitDoneRef.current = true;
+          }
+        } else {
+          fitMapToPoints(map, pointsToPath(validRoutePoints(points)));
+        }
 
         if (!cancelled) {
           setMapReady(true);
@@ -514,13 +1053,28 @@ export function TrackingMap({
         marker.setMap(null);
       });
       stopMarkersRef.current = [];
+      liveBackgroundLineRef.current?.setMap(null);
+      liveBackgroundLineRef.current = null;
       routeLineRef.current?.setMap(null);
       routeLineRef.current = null;
       mapRef.current = null;
       providerRef.current = null;
+      liveFitDoneRef.current = false;
       setMapReady(false);
     };
-  }, [ready, resetKey, pointsKey]);
+  }, [ready, resetKey]);
+
+  useEffect(() => {
+    liveFitDoneRef.current = false;
+  }, [resetKey]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map || points.length === 0) {
+      return;
+    }
+    syncMarkers(map);
+  }, [mapReady, points, live]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -537,7 +1091,6 @@ export function TrackingMap({
     segmentsKey,
     selectedSegmentId,
     showFullDayRoute,
-    validPoints,
   ]);
 
   if (!MAPS_KEY) {
@@ -572,10 +1125,12 @@ export function TrackingMap({
       {loading ? (
         <p className="muted tracking-map-status">Carregando mapa…</p>
       ) : live ? (
-        <p className="muted tracking-map-status">Ao vivo — último trecho até o ponto atual.</p>
+        <p className="muted tracking-map-status">
+          Ao vivo — rota pelas ruas dos últimos {MAX_LIVE_ROUTE_POINTS} pontos; último trecho em vermelho escuro.
+        </p>
       ) : showFullDayRoute ? (
         <p className="muted tracking-map-status">
-          Rota completa do dia — clique nos trechos da linha do tempo para focar no mapa.
+          Histórico — rotas pelas ruas por trecho; último ponto sempre ligado ao GPS recebido.
         </p>
       ) : pointExplorerOpen && activeValidIndex != null ? (
         <p className="muted tracking-map-status">

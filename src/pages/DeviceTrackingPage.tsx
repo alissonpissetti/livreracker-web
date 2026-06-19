@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { getDeviceLocations } from '../api/client';
 import { DeviceBatteryBadge } from '../components/DeviceBatteryBadge';
@@ -8,10 +8,16 @@ import { DailyTimeline } from '../components/DailyTimeline';
 import { RegisteredPointsPanel } from '../components/RegisteredPointsPanel';
 import { ShareTrackingPanel } from '../components/ShareTrackingPanel';
 import { EmergencyModePanel } from '../components/EmergencyModePanel';
+import { useAuth } from '../context/AuthContext';
 import { DEFAULT_DEVICE_ICON, isDeviceIcon } from '../constants/deviceIcons';
 import type { AccountDevice, DeviceLocation } from '../types';
 import { splitLocations, applyLocationQuality } from '../utils/locationOutliers';
 import { buildDailyTimeline } from '../utils/dailyTimeline';
+import {
+  readTrackingViewMode,
+  writeTrackingViewMode,
+  type TrackingViewMode,
+} from '../utils/trackingViewModeStorage';
 import {
   computeRouteStats,
   formatAverageSpeed,
@@ -24,7 +30,6 @@ const LIVE_POLL_MS = 8_000;
 const LIVE_POLL_EMERGENCY_MS = 5_000;
 
 type DetailTab = 'timeline' | 'points';
-type ViewMode = 'live' | 'history';
 
 function toDateInputValue(date: Date): string {
   const year = date.getFullYear();
@@ -77,9 +82,11 @@ function formatBattery(batteryPercent?: number): string {
 
 export function DeviceTrackingPage() {
   const { deviceId = '' } = useParams();
+  const { user } = useAuth();
   const todayValue = toDateInputValue(new Date());
   const [selectedDate, setSelectedDate] = useState(todayValue);
-  const [viewMode, setViewMode] = useState<ViewMode>('live');
+  const [viewMode, setViewModeState] = useState<TrackingViewMode>('live');
+  const lastStoredUserIdRef = useRef<string | null>(null);
   const [device, setDevice] = useState<AccountDevice | null>(null);
   const [locations, setLocations] = useState<DeviceLocation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -89,6 +96,34 @@ export function DeviceTrackingPage() {
   const [pointExplorerOpen, setPointExplorerOpen] = useState(false);
   const [validPointIndex, setValidPointIndex] = useState<number | null>(null);
   const lastReceivedRef = useRef<string | null>(null);
+
+  const setViewMode = useCallback(
+    (mode: TrackingViewMode, persist = true) => {
+      setViewModeState(mode);
+      if (persist) {
+        writeTrackingViewMode(user?.id, mode);
+      }
+    },
+    [user?.id],
+  );
+
+  useEffect(() => {
+    if (user?.id === lastStoredUserIdRef.current) {
+      return;
+    }
+
+    lastStoredUserIdRef.current = user?.id ?? null;
+
+    if (!user?.id) {
+      setViewModeState('live');
+      return;
+    }
+
+    const stored = readTrackingViewMode(user.id);
+    if (stored) {
+      setViewModeState(stored);
+    }
+  }, [user?.id]);
 
   const range = useMemo(() => dayRangeIso(selectedDate), [selectedDate]);
   const isSelectedToday = selectedDate === todayValue;
@@ -181,7 +216,7 @@ export function DeviceTrackingPage() {
 
   useEffect(() => {
     if (selectedDate !== todayValue) {
-      setViewMode('history');
+      setViewModeState('history');
     }
   }, [selectedDate, todayValue]);
 
@@ -210,7 +245,7 @@ export function DeviceTrackingPage() {
         const data = await getDeviceLocations(deviceId, {
           from: range.from,
           to: range.to,
-          limit: 500,
+          full: true,
         });
         if (cancelled) return;
         setDevice(data.device);
@@ -249,12 +284,12 @@ export function DeviceTrackingPage() {
 
     async function pollLatest() {
       try {
-        const from = lastReceivedRef.current
-          ? new Date(new Date(lastReceivedRef.current).getTime() + 1).toISOString()
-          : range.from;
+        if (!lastReceivedRef.current) {
+          return;
+        }
 
         const data = await getDeviceLocations(deviceId, {
-          from,
+          since: lastReceivedRef.current,
           to: range.to,
           limit: 100,
         });
