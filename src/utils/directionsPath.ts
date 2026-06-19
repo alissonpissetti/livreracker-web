@@ -1,3 +1,5 @@
+import { anchorPathToSnappedWaypoints, snapToRoads } from './roadsSnap';
+
 export type LatLng = { lat: number; lng: number };
 
 export type RoadPathResult = {
@@ -8,6 +10,7 @@ export type RoadPathResult = {
 
 export type RouteProvider = {
   computeThrough: (waypoints: LatLng[]) => Promise<LatLng[]>;
+  snapWaypoints: (waypoints: LatLng[]) => Promise<LatLng[]>;
 };
 
 type RouteClass = typeof google.maps.routes.Route;
@@ -16,17 +19,18 @@ const ROUTE_TIMEOUT_MS = 20_000;
 /** Limite prático de waypoints na Routes API. */
 const MAX_ROUTE_WAYPOINTS = 25;
 
-function haversineMeters(a: LatLng, b: LatLng): number {
-  const toRad = (deg: number) => (deg * Math.PI) / 180;
-  const earthRadius = 6_371_000;
-  const dLat = toRad(b.lat - a.lat);
-  const dLng = toRad(b.lng - a.lng);
-  const lat1 = toRad(a.lat);
-  const lat2 = toRad(b.lat);
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-  return 2 * earthRadius * Math.asin(Math.sqrt(h));
+export function isValidLatLng(
+  point: LatLng | null | undefined,
+): point is LatLng {
+  return (
+    point != null &&
+    Number.isFinite(point.lat) &&
+    Number.isFinite(point.lng)
+  );
+}
+
+export function filterValidLatLng(points: LatLng[]): LatLng[] {
+  return points.filter(isValidLatLng);
 }
 
 function decimateWaypoints(points: LatLng[], maxPoints: number): LatLng[] {
@@ -51,6 +55,7 @@ function pathFromRoute(route: google.maps.routes.Route): LatLng[] {
 
     for (let i = 0; i < latLngs.getLength(); i++) {
       const latLng = latLngs.getAt(i);
+      if (!latLng) continue;
       path.push({ lat: latLng.lat(), lng: latLng.lng() });
     }
   }
@@ -65,6 +70,13 @@ function warningForRouteError(err: unknown): string {
     return (
       'Google recusou a Routes API (403). Habilite a Routes API no Google Cloud e ' +
       'libere os referrers https://livretracker.com/* e http://localhost:5173/*.'
+    );
+  }
+
+  if (/Roads API|roads\.googleapis/i.test(message)) {
+    return (
+      'Google recusou a Roads API. Habilite a Roads API no Google Cloud na mesma chave do Maps ' +
+      '(referrers https://livretracker.com/* e http://localhost:5173/*).'
     );
   }
 
@@ -97,6 +109,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 async function computeRouteThroughRoutes(
   Route: RouteClass,
   waypoints: LatLng[],
+  rawWaypoints: LatLng[],
 ): Promise<LatLng[]> {
   if (waypoints.length < 2) {
     return waypoints;
@@ -121,18 +134,36 @@ async function computeRouteThroughRoutes(
     throw new Error('NO_ROUTE');
   }
 
-  const path = pathFromRoute(route);
+  let path = pathFromRoute(route);
   if (path.length < 2) {
     throw new Error('NO_PATH');
   }
 
+  path = anchorPathToSnappedWaypoints(path, rawWaypoints, waypoints);
   return path;
 }
 
-export function createRouteProvider(Route: RouteClass): RouteProvider {
+export function createRouteProvider(
+  Route: RouteClass,
+  apiKey: string,
+): RouteProvider {
   return {
-    computeThrough(waypoints) {
-      return computeRouteThroughRoutes(Route, waypoints);
+    async snapWaypoints(waypoints) {
+      try {
+        return await snapToRoads(apiKey, waypoints);
+      } catch {
+        return waypoints.map((point) => ({ ...point }));
+      }
+    },
+    async computeThrough(waypoints) {
+      const rawWaypoints = waypoints.map((point) => ({ ...point }));
+      let snappedWaypoints = rawWaypoints;
+      try {
+        snappedWaypoints = await snapToRoads(apiKey, rawWaypoints);
+      } catch {
+        snappedWaypoints = rawWaypoints;
+      }
+      return computeRouteThroughRoutes(Route, snappedWaypoints, rawWaypoints);
     },
   };
 }
@@ -141,31 +172,35 @@ export async function buildRoadPath(
   provider: RouteProvider,
   points: LatLng[],
 ): Promise<RoadPathResult> {
-  if (points.length < 2) {
-    return { path: points, usedFallback: false };
+  const validPoints = filterValidLatLng(points);
+  if (validPoints.length < 2) {
+    return { path: validPoints, usedFallback: false };
   }
 
-  const waypoints = decimateWaypoints(points, MAX_ROUTE_WAYPOINTS);
-  const simplified = waypoints.length < points.length;
+  const waypoints = decimateWaypoints(validPoints, MAX_ROUTE_WAYPOINTS);
+  const simplified = waypoints.length < validPoints.length;
 
   try {
-    const path = await provider.computeThrough(waypoints);
+    const path = filterValidLatLng(await provider.computeThrough(waypoints));
+    if (path.length < 2) {
+      throw new Error('NO_PATH');
+    }
 
     return {
       path,
       usedFallback: false,
       warning: simplified
-        ? `Rota pelas ruas com ${waypoints.length} pontos principais (${points.length} leituras no dia).`
+        ? `Rota pelas ruas com ${waypoints.length} pontos principais (${validPoints.length} leituras no dia).`
         : undefined,
     };
   } catch (err) {
     const message = warningForRouteError(err);
     return {
-      path: points,
+      path: [],
       usedFallback: true,
       warning: message.includes('recusou') || message.includes('403')
         ? message
-        : `${message} Exibindo linha reta entre leituras.`,
+        : `${message} Não foi possível desenhar a rota pelas ruas.`,
     };
   }
 }
@@ -174,17 +209,39 @@ export async function buildActiveRoadPath(
   provider: RouteProvider,
   points: LatLng[],
 ): Promise<LatLng[]> {
-  if (points.length < 2) {
-    return points;
-  }
-
-  if (haversineMeters(points[0], points[points.length - 1]) < 12) {
-    return points;
+  const validPoints = filterValidLatLng(points);
+  if (validPoints.length < 2) {
+    return [];
   }
 
   try {
-    return await provider.computeThrough(points);
+    const path = filterValidLatLng(await provider.computeThrough(validPoints));
+    return path.length >= 2 ? path : [];
   } catch {
-    return points;
+    return [];
   }
+}
+
+/** Rota pelas ruas quando possível; senão linha GPS entre os pontos. */
+export async function resolveDisplayPath(
+  provider: RouteProvider,
+  points: LatLng[],
+): Promise<{ path: LatLng[]; usedRoads: boolean; warning?: string }> {
+  const validPoints = filterValidLatLng(points);
+  if (validPoints.length < 2) {
+    return { path: validPoints, usedRoads: false };
+  }
+
+  const result = await buildRoadPath(provider, validPoints);
+  if (result.path.length >= 2) {
+    return { path: result.path, usedRoads: true, warning: result.warning };
+  }
+
+  return {
+    path: validPoints,
+    usedRoads: false,
+    warning:
+      result.warning ??
+      'Traçado aproximado em linha reta — não foi possível calcular rota pelas ruas.',
+  };
 }

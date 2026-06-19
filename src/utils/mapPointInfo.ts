@@ -8,14 +8,13 @@ export function formatMapBattery(batteryPercent?: number): string {
   return `${batteryPercent}%`;
 }
 
+import { formatRecordedTime } from './recordedTime';
+
 export function formatMapTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString('pt-BR', {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return formatRecordedTime(iso);
 }
 
-export type ReadingMarkerRole = 'default' | 'prev' | 'current' | 'next';
+export type ReadingMarkerRole = 'default' | 'prev' | 'current' | 'next' | 'outlier';
 
 type MarkerStyle = {
   background: string;
@@ -32,6 +31,8 @@ function markerStyle(role: ReadingMarkerRole): MarkerStyle {
       return { background: '#facc15', border: '#ffffff', size: 22, borderWidth: 3 };
     case 'next':
       return { background: '#f97316', border: '#ffffff', size: 14, borderWidth: 2 };
+    case 'outlier':
+      return { background: '#94a3b8', border: '#ef4444', size: 10, borderWidth: 2 };
     default:
       return { background: '#64748b', border: '#0f172a', size: 8, borderWidth: 1 };
   }
@@ -55,6 +56,13 @@ export function applyReadingMarkerRole(
   element.style.border = `${style.borderWidth}px solid ${style.border}`;
   element.style.boxSizing = 'border-box';
   element.style.pointerEvents = 'auto';
+  if (role === 'outlier') {
+    element.style.outline = '2px dashed #ef4444';
+    element.style.outlineOffset = '1px';
+  } else {
+    element.style.outline = '';
+    element.style.outlineOffset = '';
+  }
 }
 
 export function readingMarkerIcon(
@@ -89,6 +97,15 @@ export function readingMarkerIcon(
         strokeWeight: 2,
         scale: 7,
       };
+    case 'outlier':
+      return {
+        path: SymbolPath.CIRCLE,
+        fillColor: '#94a3b8',
+        fillOpacity: 0.7,
+        strokeColor: '#ef4444',
+        strokeWeight: 2,
+        scale: 5,
+      };
     default:
       return {
         path: SymbolPath.CIRCLE,
@@ -105,10 +122,12 @@ export function markerRoleForIndex(
   index: number,
   activeIndex: number,
   total: number,
+  excludedFromRoute?: boolean,
 ): ReadingMarkerRole {
   if (index === activeIndex) return 'current';
   if (index === activeIndex - 1) return 'prev';
   if (index === activeIndex + 1) return 'next';
+  if (excludedFromRoute) return 'outlier';
   if (total <= 3) return 'default';
   return 'default';
 }
@@ -120,6 +139,8 @@ export function markerZIndex(role: ReadingMarkerRole): number {
     case 'prev':
     case 'next':
       return 4;
+    case 'outlier':
+      return 2;
     default:
       return 1;
   }

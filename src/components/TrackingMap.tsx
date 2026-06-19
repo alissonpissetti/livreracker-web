@@ -1,78 +1,83 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DeviceLocation } from '../types';
-import { buildActiveRoadPath, buildRoadPath, createRouteProvider } from '../utils/directionsPath';
-import type { LatLng, RouteProvider } from '../utils/directionsPath';
-import { getGoogleMapId, loadGoogleMaps } from '../utils/googleMaps';
+import type { TimelineSegment } from '../utils/dailyTimeline';
+import { segmentPoints } from '../utils/dailyTimeline';
 import {
-  applyReadingMarkerRole,
-  createReadingMarkerElement,
+  createRouteProvider,
+  resolveDisplayPath,
+  type LatLng,
+  type RouteProvider,
+} from '../utils/directionsPath';
+import { getGoogleMapId, loadGoogleMaps } from '../utils/googleMaps';
+import { isValidReading, lastValidPointIndex, validRoutePoints, effectiveCoordinate } from '../utils/locationOutliers';
+import {
   markerRoleForIndex,
   markerZIndex,
+  readingMarkerIcon,
 } from '../utils/mapPointInfo';
 import { TrackingPointPanel } from './TrackingPointPanel';
+
+type MarkerEntry = {
+  marker: google.maps.Marker;
+  validIndex: number;
+};
 
 type TrackingMapProps = {
   points: DeviceLocation[];
   ready?: boolean;
   resetKey?: string;
   live?: boolean;
+  /** Histórico: exibe todos os trechos coloridos do dia. */
+  showFullDayRoute?: boolean;
+  segments?: TimelineSegment[];
+  selectedSegmentId?: string | null;
+  pointExplorerOpen?: boolean;
+  validPointIndex?: number | null;
+  onValidPointSelect?: (index: number) => void;
+  onPointExplorerClose?: () => void;
+  onPointPrevious?: () => void;
+  onPointNext?: () => void;
 };
-
-type MarkerEntry = {
-  marker: google.maps.marker.AdvancedMarkerElement;
-  content: HTMLDivElement;
-};
-
-type LatLngLiteral = { lat: number; lng: number };
 
 const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? '';
-const PANEL_WIDTH = 300;
 const LIVE_ZOOM = 16;
 
-function mapPadding(panelOpen: boolean): google.maps.Padding {
-  return {
-    top: 56,
-    right: panelOpen ? PANEL_WIDTH + 24 : 48,
-    bottom: 48,
-    left: 48,
-  };
+function isValidLocation(point: DeviceLocation): boolean {
+  return Number.isFinite(point.latitude) && Number.isFinite(point.longitude);
 }
 
-function toLatLng(point: DeviceLocation): LatLngLiteral {
-  return { lat: point.latitude, lng: point.longitude };
+function toLatLng(point: DeviceLocation): LatLng {
+  const coordinate = effectiveCoordinate(point);
+  return { lat: coordinate.lat, lng: coordinate.lng };
 }
 
-function boundsNeedZoom(bounds: google.maps.LatLngBounds): boolean {
-  const ne = bounds.getNorthEast();
-  const sw = bounds.getSouthWest();
-  return ne.lat() === sw.lat() && ne.lng() === sw.lng();
+function pointsToPath(points: DeviceLocation[]): LatLng[] {
+  return points.filter(isValidLocation).map(toLatLng);
 }
 
-function focusMapOnSegment(
-  map: google.maps.Map,
-  segment: LatLngLiteral[],
-  padding: google.maps.Padding,
-): void {
-  if (segment.length === 0) {
+function fitMapToPoints(map: google.maps.Map, path: LatLng[]): void {
+  if (path.length === 0) {
     return;
   }
-
-  if (segment.length === 1) {
-    map.setCenter(segment[0]);
+  if (path.length === 1) {
+    map.setCenter(path[0]);
     map.setZoom(LIVE_ZOOM);
     return;
   }
-
   const bounds = new google.maps.LatLngBounds();
-  segment.forEach((point) => bounds.extend(point));
+  path.forEach((point) => bounds.extend(point));
+  map.fitBounds(bounds, 48);
+}
 
-  if (boundsNeedZoom(bounds)) {
-    map.setCenter(segment[segment.length - 1]);
-    map.setZoom(LIVE_ZOOM);
-    return;
-  }
-
-  map.fitBounds(bounds, padding);
+function createStopIcon(color: string): google.maps.Symbol {
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    fillColor: color,
+    fillOpacity: 1,
+    strokeColor: '#ffffff',
+    strokeWeight: 2,
+    scale: 8,
+  };
 }
 
 export function TrackingMap({
@@ -80,327 +85,411 @@ export function TrackingMap({
   ready = true,
   resetKey = 'default',
   live = false,
+  showFullDayRoute = false,
+  segments = [],
+  selectedSegmentId = null,
+  pointExplorerOpen = false,
+  validPointIndex = null,
+  onValidPointSelect,
+  onPointExplorerClose,
+  onPointPrevious,
+  onPointNext,
 }: TrackingMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
-  const routeProviderRef = useRef<RouteProvider | null>(null);
-  const activeRouteRequestRef = useRef(0);
-  const panelOpenRef = useRef(true);
-  const prevPointsLengthRef = useRef(0);
-  const pointsRef = useRef(points);
-  const liveRef = useRef(live);
-  const syncLiveViewRef = useRef<() => void>(() => {});
-  const overlaysRef = useRef<{
-    routeLine: google.maps.Polyline | null;
-    activeRouteLine: google.maps.Polyline | null;
-    markers: MarkerEntry[];
-  }>({ routeLine: null, activeRouteLine: null, markers: [] });
+  const providerRef = useRef<RouteProvider | null>(null);
+  const markersRef = useRef<MarkerEntry[]>([]);
+  const onValidPointSelectRef = useRef(onValidPointSelect);
+  onValidPointSelectRef.current = onValidPointSelect;
+  const routeLineRef = useRef<google.maps.Polyline | null>(null);
+  const backgroundLinesRef = useRef<google.maps.Polyline[]>([]);
+  const stopMarkersRef = useRef<google.maps.Marker[]>([]);
+  const drawTokenRef = useRef(0);
 
-  const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [mapReady, setMapReady] = useState(false);
-  const [usedFallback, setUsedFallback] = useState(false);
-  const [routeWarning, setRouteWarning] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
-  const [panelOpen, setPanelOpen] = useState(true);
+  const [error, setError] = useState('');
+  const [routeNote, setRouteNote] = useState('');
 
-  panelOpenRef.current = panelOpen;
-  pointsRef.current = points;
-  liveRef.current = live;
+  const pointsKey = `${points.length}:${points.at(-1)?.id ?? 'none'}`;
+  const segmentsKey = segments.map((segment) => segment.id).join('|');
+  const validPoints = useMemo(() => validRoutePoints(points), [points]);
+  const activeValidIndex =
+    pointExplorerOpen &&
+    validPointIndex != null &&
+    validPointIndex >= 0 &&
+    validPointIndex < validPoints.length
+      ? validPointIndex
+      : null;
 
-  const goPrevious = useCallback(() => {
-    if (live) return;
-    setActiveIndex((current) => Math.max(0, current - 1));
-  }, [live]);
+  function updateMarkerStyles(activeIndex: number | null): void {
+    const total = markersRef.current.length;
+    for (const entry of markersRef.current) {
+      const role =
+        activeIndex == null
+          ? 'default'
+          : markerRoleForIndex(entry.validIndex, activeIndex, total);
+      entry.marker.setIcon(readingMarkerIcon(google.maps.SymbolPath, role));
+      entry.marker.setZIndex(markerZIndex(role));
+    }
+  }
 
-  const goNext = useCallback(() => {
-    if (live) return;
-    setActiveIndex((current) => Math.min(points.length - 1, current + 1));
-  }, [live, points.length]);
-
-  const updateMarkerStyles = useCallback((selectedIndex: number) => {
-    overlaysRef.current.markers.forEach((entry, index) => {
-      const role = markerRoleForIndex(index, selectedIndex, overlaysRef.current.markers.length);
-      applyReadingMarkerRole(entry.content, role);
-      entry.marker.zIndex = markerZIndex(role);
+  function clearDynamicLayers(): void {
+    backgroundLinesRef.current.forEach((line) => line.setMap(null));
+    backgroundLinesRef.current = [];
+    stopMarkersRef.current.forEach((marker) => {
+      marker.setMap(null);
     });
-  }, []);
+    stopMarkersRef.current = [];
+    routeLineRef.current?.setPath([]);
+  }
 
-  const updateActiveRoute = useCallback(async (index: number) => {
-    const map = mapRef.current;
-    const provider = routeProviderRef.current;
-    const line = overlaysRef.current.activeRouteLine;
-    const currentPoints = pointsRef.current;
-    if (!map || !line || currentPoints.length === 0) {
+  function setMainRoute(map: google.maps.Map, path: LatLng[], color: string): void {
+    const line = routeLineRef.current;
+    if (!line || path.length < 2) {
       return;
     }
-
-    const start = Math.max(0, index - 1);
-    const end = index;
-    const slice: LatLng[] = currentPoints
-      .slice(start, end + 1)
-      .map(toLatLng);
-
-    line.setPath(slice);
-    line.setMap(slice.length > 0 ? map : null);
-
-    if (!provider || slice.length < 2) {
-      return;
-    }
-
-    const requestId = ++activeRouteRequestRef.current;
-    const path = await buildActiveRoadPath(provider, slice);
-    if (requestId !== activeRouteRequestRef.current) {
-      return;
-    }
-
     line.setPath(path);
+    line.setOptions({
+      geodesic: true,
+      strokeColor: color,
+      strokeOpacity: 1,
+      strokeWeight: 8,
+      zIndex: 1000,
+    });
     line.setMap(map);
-  }, []);
+  }
 
-  const focusReading = useCallback(
-    (index: number) => {
-      const map = mapRef.current;
-      const currentPoints = pointsRef.current;
-      const point = currentPoints[index];
-      if (!map || !point) {
+  async function drawPointExplorer(
+    map: google.maps.Map,
+    provider: RouteProvider | null,
+    routePoints: DeviceLocation[],
+    activeIndex: number,
+  ): Promise<void> {
+    const token = ++drawTokenRef.current;
+    clearDynamicLayers();
+    updateMarkerStyles(activeIndex);
+    setRouteNote('');
+
+    const current = routePoints[activeIndex];
+    if (!current || !isValidLocation(current)) {
+      return;
+    }
+
+    const previous = activeIndex > 0 ? routePoints[activeIndex - 1] : null;
+    if (!previous || !isValidLocation(previous)) {
+      fitMapToPoints(map, [toLatLng(current)]);
+      return;
+    }
+
+    const path = [toLatLng(previous), toLatLng(current)];
+    setMainRoute(map, path, '#dc2626');
+    fitMapToPoints(map, path);
+
+    if (!provider || token !== drawTokenRef.current) {
+      return;
+    }
+
+    const resolved = await resolveDisplayPath(provider, path);
+    if (token !== drawTokenRef.current) {
+      return;
+    }
+    if (resolved.path.length >= 2) {
+      setMainRoute(map, resolved.path, '#dc2626');
+      fitMapToPoints(map, resolved.path);
+    }
+    if (resolved.warning) {
+      setRouteNote(resolved.warning);
+    }
+  }
+
+  async function drawFullDayRoute(
+    map: google.maps.Map,
+    provider: RouteProvider | null,
+    currentPoints: DeviceLocation[],
+    currentSegments: TimelineSegment[],
+    focusSegmentId: string | null,
+  ): Promise<void> {
+    const token = ++drawTokenRef.current;
+    clearDynamicLayers();
+    updateMarkerStyles(null);
+    setRouteNote('');
+
+    const focusSegment = currentSegments.find((segment) => segment.id === focusSegmentId);
+    let focusPath: LatLng[] = [];
+
+    for (const segment of currentSegments) {
+      if (segment.kind === 'stop') {
+        const marker = new google.maps.Marker({
+          map,
+          position: { lat: segment.centroidLat, lng: segment.centroidLng },
+          icon: createStopIcon(segment.color),
+          zIndex: segment.id === focusSegmentId ? 6 : 5,
+        });
+        stopMarkersRef.current.push(marker);
+        continue;
+      }
+
+      const path = pointsToPath(segmentPoints(currentPoints, segment));
+      if (path.length < 2) {
+        continue;
+      }
+
+      const isFocused = segment.id === focusSegmentId;
+      if (isFocused) {
+        focusPath = path;
+      }
+
+      const line = new google.maps.Polyline({
+        map,
+        path,
+        geodesic: true,
+        strokeColor: segment.color,
+        strokeOpacity: 1,
+        strokeWeight: isFocused ? 9 : 6,
+        zIndex: isFocused ? 1000 : 10,
+      });
+      backgroundLinesRef.current.push(line);
+
+      if (!provider || token !== drawTokenRef.current) {
+        continue;
+      }
+
+      void resolveDisplayPath(provider, path).then((resolved) => {
+        if (token !== drawTokenRef.current || resolved.path.length < 2) {
+          return;
+        }
+        line.setPath(resolved.path);
+        if (isFocused) {
+          focusPath = resolved.path;
+          fitMapToPoints(map, focusPath);
+        }
+      });
+    }
+
+    if (focusSegment?.kind === 'stop') {
+      fitMapToPoints(map, [{ lat: focusSegment.centroidLat, lng: focusSegment.centroidLng }]);
+    } else if (focusPath.length >= 2) {
+      fitMapToPoints(map, focusPath);
+    } else {
+      fitMapToPoints(map, pointsToPath(validRoutePoints(currentPoints)));
+    }
+  }
+
+  async function drawScene(
+    map: google.maps.Map,
+    provider: RouteProvider | null,
+    currentPoints: DeviceLocation[],
+    currentSegments: TimelineSegment[],
+    segmentId: string | null,
+    isLive: boolean,
+  ): Promise<void> {
+    const token = ++drawTokenRef.current;
+    clearDynamicLayers();
+    setRouteNote('');
+
+    if (!isLive && activeValidIndex != null) {
+      await drawPointExplorer(map, provider, validPoints, activeValidIndex);
+      return;
+    }
+
+    updateMarkerStyles(null);
+
+    if (showFullDayRoute) {
+      await drawFullDayRoute(map, provider, currentPoints, currentSegments, segmentId);
+      return;
+    }
+
+    if (isLive) {
+      const lastIndex = lastValidPointIndex(currentPoints);
+      let prev: DeviceLocation | null = null;
+      for (let index = lastIndex - 1; index >= 0; index -= 1) {
+        if (isValidReading(currentPoints[index]) && isValidLocation(currentPoints[index])) {
+          prev = currentPoints[index];
+          break;
+        }
+      }
+      const current = currentPoints[lastIndex];
+      if (!prev || !current || !isValidLocation(current)) {
+        fitMapToPoints(map, pointsToPath(currentPoints));
         return;
       }
 
-      updateMarkerStyles(index);
-      void updateActiveRoute(index);
+      const path = [toLatLng(prev), toLatLng(current)];
+      setMainRoute(map, path, '#dc2626');
+      fitMapToPoints(map, path);
 
-      const padding = mapPadding(panelOpenRef.current);
-      const prev = index > 0 ? currentPoints[index - 1] : null;
-      const next = index < currentPoints.length - 1 ? currentPoints[index + 1] : null;
-      const focusPath = [prev, point, next]
-        .filter((item): item is DeviceLocation => item != null)
-        .map(toLatLng);
-
-      focusMapOnSegment(map, focusPath, padding);
-    },
-    [updateActiveRoute, updateMarkerStyles],
-  );
-
-  const syncLiveView = useCallback(() => {
-    if (!liveRef.current || !mapRef.current) {
-      return;
-    }
-
-    const currentPoints = pointsRef.current;
-    if (currentPoints.length === 0) {
-      return;
-    }
-
-    const lastIndex = currentPoints.length - 1;
-    setActiveIndex(lastIndex);
-    focusReading(lastIndex);
-  }, [focusReading]);
-
-  syncLiveViewRef.current = syncLiveView;
-
-  useEffect(() => {
-    setPanelOpen(true);
-    prevPointsLengthRef.current = 0;
-    if (!live) {
-      setActiveIndex(0);
-    }
-  }, [resetKey, live]);
-
-  useEffect(() => {
-    if (!live || !mapReady || loading || points.length === 0) {
-      return;
-    }
-    syncLiveView();
-  }, [live, loading, mapReady, panelOpen, points.length, points.at(-1)?.id, syncLiveView]);
-
-  useEffect(() => {
-    if (live || !mapReady || loading || points.length === 0) {
-      return;
-    }
-    focusReading(activeIndex);
-  }, [activeIndex, focusReading, live, loading, mapReady, panelOpen, points.length]);
-
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (
-        event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLTextAreaElement ||
-        event.target instanceof HTMLSelectElement
-      ) {
+      if (!provider || token !== drawTokenRef.current) {
         return;
       }
 
-      if (event.key === 'ArrowLeft') {
-        event.preventDefault();
-        goPrevious();
+      const resolved = await resolveDisplayPath(provider, path);
+      if (token !== drawTokenRef.current) {
+        return;
       }
-
-      if (event.key === 'ArrowRight') {
-        event.preventDefault();
-        goNext();
+      if (resolved.path.length >= 2) {
+        setMainRoute(map, resolved.path, '#dc2626');
+        fitMapToPoints(map, resolved.path);
       }
+      if (resolved.warning) {
+        setRouteNote(resolved.warning);
+      }
+      return;
     }
 
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [goNext, goPrevious]);
+    const selected = currentSegments.find((segment) => segment.id === segmentId);
+
+    for (const segment of currentSegments) {
+      if (segment.kind === 'stop') {
+        const marker = new google.maps.Marker({
+          map,
+          position: { lat: segment.centroidLat, lng: segment.centroidLng },
+          icon: createStopIcon(segment.color),
+          zIndex: 5,
+        });
+        stopMarkersRef.current.push(marker);
+        continue;
+      }
+
+      const path = pointsToPath(segmentPoints(currentPoints, segment));
+      if (path.length < 2) {
+        continue;
+      }
+
+      const isSelected = segment.id === segmentId;
+      if (isSelected) {
+        continue;
+      }
+
+      const line = new google.maps.Polyline({
+        map,
+        path,
+        geodesic: true,
+        strokeColor: segment.color,
+        strokeOpacity: 0.3,
+        strokeWeight: 4,
+        zIndex: 1,
+      });
+      backgroundLinesRef.current.push(line);
+    }
+
+    if (!selected) {
+      fitMapToPoints(map, pointsToPath(validRoutePoints(currentPoints)));
+      return;
+    }
+
+    if (selected.kind === 'stop') {
+      fitMapToPoints(map, [{ lat: selected.centroidLat, lng: selected.centroidLng }]);
+      return;
+    }
+
+    const mainPath = pointsToPath(segmentPoints(currentPoints, selected));
+    if (mainPath.length < 2) {
+      fitMapToPoints(map, pointsToPath(currentPoints));
+      return;
+    }
+
+    setMainRoute(map, mainPath, selected.color);
+    fitMapToPoints(map, mainPath);
+
+    if (!provider || token !== drawTokenRef.current) {
+      return;
+    }
+
+    const resolved = await resolveDisplayPath(provider, mainPath);
+    if (token !== drawTokenRef.current) {
+      return;
+    }
+    if (resolved.path.length >= 2) {
+      setMainRoute(map, resolved.path, selected.color);
+      fitMapToPoints(map, resolved.path);
+    }
+    if (resolved.warning) {
+      setRouteNote(resolved.warning);
+    }
+  }
 
   useEffect(() => {
     const container = containerRef.current;
-
-    function clearOverlays() {
-      overlaysRef.current.markers.forEach((entry) => {
-        entry.marker.map = null;
-      });
-      overlaysRef.current.routeLine?.setMap(null);
-      overlaysRef.current.activeRouteLine?.setMap(null);
-      overlaysRef.current = { routeLine: null, activeRouteLine: null, markers: [] };
-    }
-
-    function resetMapInstance() {
-      clearOverlays();
-      mapRef.current = null;
-      routeProviderRef.current = null;
-      activeRouteRequestRef.current += 1;
-      if (container) {
-        container.replaceChildren();
-      }
-    }
-
-    function destroyMap() {
-      resetMapInstance();
-      setMapReady(false);
-    }
-
     if (!ready || !container || points.length === 0) {
-      destroyMap();
+      setMapReady(false);
       setLoading(false);
-      setError('');
-      setUsedFallback(false);
-      setRouteWarning('');
       return;
     }
 
     let cancelled = false;
-
     setLoading(true);
     setMapReady(false);
     setError('');
-    setUsedFallback(false);
-    setRouteWarning('');
 
-    loadGoogleMaps(MAPS_KEY)
-      .then(
-        async ({ Map, Polyline, LatLngBounds, AdvancedMarkerElement, Route }) => {
-          if (cancelled || !containerRef.current) return;
+    void loadGoogleMaps(MAPS_KEY)
+      .then(async ({ Map, Polyline, Route }) => {
+        if (cancelled || !containerRef.current) {
+          return;
+        }
 
-          const currentPoints = pointsRef.current;
-          if (currentPoints.length === 0) return;
+        markersRef.current.forEach((entry) => {
+          entry.marker.setMap(null);
+        });
+        markersRef.current = [];
+        routeLineRef.current?.setMap(null);
+        routeLineRef.current = null;
+        mapRef.current = null;
 
-          const currentGpsPath = currentPoints.map(toLatLng);
-          const isLive = liveRef.current;
+        const seed = pointsToPath(points).at(-1);
+        if (!seed) {
+          return;
+        }
 
-          routeProviderRef.current = createRouteProvider(Route);
+        const map = new Map(containerRef.current, {
+          mapId: getGoogleMapId(),
+          center: seed,
+          zoom: LIVE_ZOOM,
+          mapTypeControl: false,
+          streetViewControl: false,
+          fullscreenControl: true,
+        });
 
-          let routePath = currentGpsPath;
-          let usedFallback = false;
-          let warning: string | undefined;
+        mapRef.current = map;
+        providerRef.current = createRouteProvider(Route, MAPS_KEY);
 
-          if (isLive) {
-            usedFallback = true;
-          } else {
-            const routeResult = await buildRoadPath(routeProviderRef.current, currentGpsPath);
-            routePath = routeResult.path;
-            usedFallback = routeResult.usedFallback;
-            warning = routeResult.warning;
+        let validIndex = 0;
+        for (const point of points) {
+          if (!isValidLocation(point) || !isValidReading(point)) {
+            continue;
           }
-
-          if (cancelled || !containerRef.current) return;
-
-          setUsedFallback(usedFallback);
-          setRouteWarning(
-            warning && !warning.includes('recusou') ? warning : '',
-          );
-          setError(
-            warning && warning.includes('recusou') ? warning : '',
-          );
-
-          resetMapInstance();
-
-          const lastPoint = currentGpsPath[currentGpsPath.length - 1];
-          mapRef.current = new Map(containerRef.current, {
-            mapId: getGoogleMapId(),
-            center: lastPoint,
-            zoom: LIVE_ZOOM,
-            mapTypeControl: false,
-            streetViewControl: false,
-            fullscreenControl: true,
-          });
-
-          const map = mapRef.current;
-          const lastIndex = currentPoints.length - 1;
-          const liveSegment = currentGpsPath.slice(Math.max(0, lastIndex - 1), lastIndex + 1);
-
-          overlaysRef.current.routeLine = new Polyline({
-            path: routePath,
-            geodesic: true,
-            strokeColor: '#38bdf8',
-            strokeOpacity: isLive ? 0.35 : 0.45,
-            strokeWeight: isLive ? 3 : 4,
+          const marker = new google.maps.Marker({
             map,
-            zIndex: 1,
+            position: toLatLng(point),
+            icon: readingMarkerIcon(google.maps.SymbolPath, 'default'),
+            zIndex: markerZIndex('default'),
           });
-
-          overlaysRef.current.activeRouteLine = new Polyline({
-            path: liveSegment,
-            geodesic: true,
-            strokeColor: '#facc15',
-            strokeOpacity: 1,
-            strokeWeight: 7,
-            map,
-            zIndex: 2,
+          const capturedIndex = validIndex;
+          marker.addListener('click', () => {
+            if (!live) {
+              onValidPointSelectRef.current?.(capturedIndex);
+            }
           });
+          markersRef.current.push({ marker, validIndex: capturedIndex });
+          validIndex += 1;
+        }
 
-          overlaysRef.current.markers = currentPoints.map((point, index) => {
-            const content = createReadingMarkerElement('default');
-            const marker = new AdvancedMarkerElement({
-              map,
-              position: toLatLng(point),
-              content,
-              zIndex: 1,
-              title: `Leitura #${index + 1}`,
-            });
+        routeLineRef.current = new Polyline({
+          map,
+          path: [],
+          geodesic: true,
+          strokeColor: '#dc2626',
+          strokeOpacity: 1,
+          strokeWeight: 8,
+          zIndex: 1000,
+        });
 
-            marker.addListener('click', () => {
-              if (!liveRef.current) {
-                setActiveIndex(index);
-              }
-            });
+        fitMapToPoints(map, pointsToPath(validRoutePoints(points)));
 
-            return { marker, content };
-          });
-
-          prevPointsLengthRef.current = currentPoints.length;
-
-          if (isLive) {
-            setActiveIndex(lastIndex);
-            updateMarkerStyles(lastIndex);
-            focusMapOnSegment(map, liveSegment, mapPadding(panelOpenRef.current));
-            void updateActiveRoute(lastIndex);
-          } else {
-            const bounds = new LatLngBounds();
-            routePath.forEach((position) => bounds.extend(position));
-            map.fitBounds(bounds, 48);
-            setActiveIndex(0);
-            updateMarkerStyles(0);
-          }
-
-          if (!cancelled) {
-            setMapReady(true);
-          }
-        },
-      )
+        if (!cancelled) {
+          setMapReady(true);
+        }
+      })
       .catch((err: Error) => {
         if (!cancelled) {
           setError(err.message);
@@ -409,91 +498,53 @@ export function TrackingMap({
       .finally(() => {
         if (!cancelled) {
           setLoading(false);
-          if (liveRef.current) {
-            window.setTimeout(() => syncLiveViewRef.current(), 0);
-          }
         }
       });
 
     return () => {
       cancelled = true;
-      destroyMap();
+      drawTokenRef.current += 1;
+      markersRef.current.forEach((entry) => {
+        entry.marker.setMap(null);
+      });
+      markersRef.current = [];
+      backgroundLinesRef.current.forEach((line) => line.setMap(null));
+      backgroundLinesRef.current = [];
+      stopMarkersRef.current.forEach((marker) => {
+        marker.setMap(null);
+      });
+      stopMarkersRef.current = [];
+      routeLineRef.current?.setMap(null);
+      routeLineRef.current = null;
+      mapRef.current = null;
+      providerRef.current = null;
+      setMapReady(false);
     };
-  }, [live, ready, resetKey, updateActiveRoute, updateMarkerStyles]);
+  }, [ready, resetKey, pointsKey]);
 
   useEffect(() => {
-    if (!live || !mapReady || loading || points.length === 0) {
-      return;
-    }
-
-    const prevLength = prevPointsLengthRef.current;
-    if (points.length <= prevLength) {
-      return;
-    }
-
-    appendMapPoints(prevLength);
-    prevPointsLengthRef.current = points.length;
-    syncLiveView();
-  }, [live, loading, mapReady, points, syncLiveView]);
-
-  useEffect(() => {
-    if (live || !mapReady || loading || points.length === 0) {
-      return;
-    }
-
-    const prevLength = prevPointsLengthRef.current;
-    if (points.length <= prevLength) {
-      return;
-    }
-
-    appendMapPoints(prevLength);
-    prevPointsLengthRef.current = points.length;
-  }, [live, loading, mapReady, points]);
-
-  function appendMapPoints(fromIndex: number): void {
     const map = mapRef.current;
-    const routeLine = overlaysRef.current.routeLine;
-    if (!map || !routeLine) {
+    if (!mapReady || !map) {
       return;
     }
-
-    const AdvancedMarkerElement = google.maps.marker.AdvancedMarkerElement;
-    const routePath = routeLine
-      .getPath()
-      .getArray()
-      .map((position) => ({ lat: position.lat(), lng: position.lng() }));
-
-    for (let index = fromIndex; index < points.length; index += 1) {
-      const point = points[index];
-      routePath.push(toLatLng(point));
-
-      const content = createReadingMarkerElement('default');
-      const marker = new AdvancedMarkerElement({
-        map,
-        position: toLatLng(point),
-        content,
-        zIndex: 1,
-        title: `Leitura #${index + 1}`,
-      });
-
-      marker.addListener('click', () => {
-        if (!liveRef.current) {
-          setActiveIndex(index);
-        }
-      });
-
-      overlaysRef.current.markers.push({ marker, content });
-    }
-
-    routeLine.setPath(routePath);
-  }
+    void drawScene(map, providerRef.current, points, segments, selectedSegmentId, live);
+  }, [
+    activeValidIndex,
+    live,
+    mapReady,
+    points,
+    segments,
+    segmentsKey,
+    selectedSegmentId,
+    showFullDayRoute,
+    validPoints,
+  ]);
 
   if (!MAPS_KEY) {
     return (
       <div className="tracking-map-empty card">
         <p>
-          Configure <code>VITE_GOOGLE_MAPS_API_KEY</code> no <code>.env</code> da
-          raiz e reinicie o Vite.
+          Configure <code>VITE_GOOGLE_MAPS_API_KEY</code> no <code>.env</code> e reinicie o Vite.
         </p>
       </div>
     );
@@ -519,48 +570,58 @@ export function TrackingMap({
   return (
     <div className="tracking-map-wrap">
       {loading ? (
-        <p className="muted tracking-map-status">Traçando rota pelas ruas…</p>
+        <p className="muted tracking-map-status">Carregando mapa…</p>
       ) : live ? (
+        <p className="muted tracking-map-status">Ao vivo — último trecho até o ponto atual.</p>
+      ) : showFullDayRoute ? (
         <p className="muted tracking-map-status">
-          Modo ao vivo — último trecho entre as duas leituras mais recentes.
+          Rota completa do dia — clique nos trechos da linha do tempo para focar no mapa.
+        </p>
+      ) : pointExplorerOpen && activeValidIndex != null ? (
+        <p className="muted tracking-map-status">
+          Modo ponto a ponto — trecho vermelho entre a leitura anterior e a atual.
         </p>
       ) : (
         <p className="muted tracking-map-status">
-          Rota completa — clique nos pontos ou use o painel. Setas do teclado também funcionam.
+          Clique nos trechos da linha do tempo para ver a rota no mapa.
         </p>
       )}
-      {routeWarning && !error ? (
-        <p className="muted tracking-map-status">{routeWarning}</p>
-      ) : null}
-      {usedFallback && !routeWarning && !error && !live ? (
-        <p className="muted tracking-map-status">
-          Parte da rota foi desenhada em linha reta entre leituras.
-        </p>
-      ) : null}
+      {routeNote ? <p className="muted tracking-map-status">{routeNote}</p> : null}
       {error ? <p className="error-text">{error}</p> : null}
 
       <div className="tracking-map-stage">
-        <div ref={containerRef} className="tracking-map" aria-label="Mapa de rastreio" />
-
-        {!loading ? (
+        {!live && validPoints.length > 0 && onValidPointSelect ? (
           <button
             type="button"
             className="tracking-panel-toggle"
-            onClick={() => setPanelOpen((open) => !open)}
+            onClick={() => {
+              if (pointExplorerOpen) {
+                onPointExplorerClose?.();
+                return;
+              }
+              onValidPointSelect(0);
+            }}
           >
-            {panelOpen ? 'Ocultar detalhes' : 'Ver detalhes'}
+            {pointExplorerOpen ? 'Fechar pontos' : 'Ponto a ponto'}
           </button>
         ) : null}
 
-        {!loading && panelOpen ? (
+        {pointExplorerOpen &&
+        activeValidIndex != null &&
+        onPointPrevious &&
+        onPointNext &&
+        onPointExplorerClose ? (
           <TrackingPointPanel
-            points={points}
-            activeIndex={activeIndex}
-            onPrevious={goPrevious}
-            onNext={goNext}
-            onClose={() => setPanelOpen(false)}
+            points={validPoints}
+            activeIndex={activeValidIndex}
+            corridorCorrected={Boolean(validPoints[activeValidIndex]?.corridor_corrected)}
+            onPrevious={onPointPrevious}
+            onNext={onPointNext}
+            onClose={onPointExplorerClose}
           />
         ) : null}
+
+        <div ref={containerRef} className="tracking-map" aria-label="Mapa de rastreio" />
       </div>
     </div>
   );

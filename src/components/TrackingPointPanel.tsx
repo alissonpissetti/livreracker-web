@@ -4,10 +4,13 @@ import {
   formatMapSpeed,
   formatMapTime,
 } from '../utils/mapPointInfo';
+import { formatRecordedDateTime } from '../utils/recordedTime';
 
 type TrackingPointPanelProps = {
   points: DeviceLocation[];
   activeIndex: number;
+  excludedFromRoute?: boolean;
+  corridorCorrected?: boolean;
   onPrevious: () => void;
   onNext: () => void;
   onClose: () => void;
@@ -51,6 +54,8 @@ function StepCard({
 export function TrackingPointPanel({
   points,
   activeIndex,
+  excludedFromRoute = false,
+  corridorCorrected = false,
   onPrevious,
   onNext,
   onClose,
@@ -69,7 +74,7 @@ export function TrackingPointPanel({
         <div>
           <p className="tracking-point-panel-title">Leitura {activeIndex + 1} de {points.length}</p>
           <p className="muted tracking-point-panel-sub">
-            Amarelo grosso = trecho pelas ruas · Marcadores: verde, amarelo e laranja
+            Linha vermelha = caminho pelas ruas entre a leitura anterior e a atual.
           </p>
         </div>
         <button
@@ -81,6 +86,18 @@ export function TrackingPointPanel({
           ×
         </button>
       </div>
+
+      {excludedFromRoute ? (
+        <p className="tracking-point-panel-warning muted">
+          Leitura excluída da rota (GPS impreciso ou salto). Posição no mapa encaixada na via mais próxima.
+        </p>
+      ) : null}
+
+      {corridorCorrected ? (
+        <p className="tracking-point-panel-warning muted">
+          GPS desviou lateralmente; posição ajustada para o eixo do trecho (entre a leitura anterior e a próxima).
+        </p>
+      ) : null}
 
       <div className="tracking-step-flow" aria-hidden="true">
         <StepCard
@@ -116,7 +133,7 @@ export function TrackingPointPanel({
       <dl className="tracking-point-panel-details">
         <div>
           <dt>Data/hora</dt>
-          <dd>{new Date(current.recorded_at).toLocaleString('pt-BR')}</dd>
+          <dd>{formatRecordedDateTime(current.recorded_at)}</dd>
         </div>
         <div>
           <dt>Velocidade</dt>

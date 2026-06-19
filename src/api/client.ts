@@ -2,6 +2,8 @@ import type {
   AccountDevice,
   AccountOrder,
   DeviceLocationsResponse,
+  PublicTrackingResponse,
+  TrackingShareLink,
   AdminManagedDevice,
   AdminOrder,
   AdminOverview,
@@ -230,6 +232,49 @@ export function renewDevice(deviceSlotId: string) {
     method: 'PATCH',
     body: JSON.stringify({ days: 30 }),
   });
+}
+
+export function createDeviceShareLink(
+  deviceSlotId: string,
+  body: { recipient_name: string; expires_in_hours?: number },
+) {
+  return api<TrackingShareLink>(`/v1/account/devices/${deviceSlotId}/share-links`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export function listDeviceShareLinks(deviceSlotId: string) {
+  return api<{ shares: TrackingShareLink[] }>(
+    `/v1/account/devices/${deviceSlotId}/share-links`,
+  );
+}
+
+export function revokeDeviceShareLink(deviceSlotId: string, shareId: string) {
+  return api<TrackingShareLink>(
+    `/v1/account/devices/${deviceSlotId}/share-links/${shareId}`,
+    { method: 'DELETE' },
+  );
+}
+
+export function dismissDeviceShareLink(deviceSlotId: string, shareId: string) {
+  return api<{ ok: true }>(`/v1/account/devices/${deviceSlotId}/share-links/${shareId}/dismiss`, {
+    method: 'POST',
+  });
+}
+
+export function getPublicTracking(
+  token: string,
+  params?: { since?: string; limit?: number },
+) {
+  const search = new URLSearchParams();
+  if (params?.since) search.set('since', params.since);
+  if (params?.limit) search.set('limit', String(params.limit));
+  const query = search.toString();
+  return api<PublicTrackingResponse>(
+    `/v1/public/track/${encodeURIComponent(token)}${query ? `?${query}` : ''}`,
+    { auth: false },
+  );
 }
 
 export function getAdminOverview() {

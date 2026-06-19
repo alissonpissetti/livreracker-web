@@ -96,12 +96,35 @@ export type DeviceLocation = {
   accuracy_m?: number;
   battery_percent?: number;
   location_source?: string;
+  is_valid?: boolean;
+  /** Posição ajustada quando a leitura desvia lateralmente do trecho. */
+  corrected_latitude?: number;
+  corrected_longitude?: number;
+  corridor_corrected?: boolean;
   recorded_at: string;
   received_at: string;
 };
 
 export type DeviceLocationsResponse = {
   device: AccountDevice;
+  locations: DeviceLocation[];
+};
+
+export type TrackingShareLink = {
+  id: string;
+  token: string;
+  recipient_name: string;
+  expires_at: string | null;
+  created_at: string;
+  share_url: string;
+  is_active: boolean;
+};
+
+export type PublicTrackingResponse = {
+  recipient_name: string;
+  device_label: string;
+  device_icon: string;
+  expires_at: string | null;
   locations: DeviceLocation[];
 };
 

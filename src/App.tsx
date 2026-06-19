@@ -10,6 +10,7 @@ import { CheckoutPage } from './pages/CheckoutPage';
 import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
 import { RecoverPasswordPage } from './pages/RecoverPasswordPage';
+import { PublicTrackingPage } from './pages/PublicTrackingPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { ShopPage } from './pages/ShopPage';
 import { AdminDevicesPage } from './pages/admin/AdminDevicesPage';
@@ -27,6 +28,7 @@ export default function App() {
           <Route element={<Layout />}>
             <Route index element={<HomePage />} />
             <Route path="loja" element={<ShopPage />} />
+            <Route path="acompanhar/:token" element={<PublicTrackingPage />} />
             <Route path="entrar" element={<LoginPage />} />
             <Route path="recuperar-senha" element={<RecoverPasswordPage />} />
             <Route path="cadastro" element={<RegisterPage />} />
