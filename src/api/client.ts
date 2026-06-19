@@ -234,6 +234,18 @@ export function renewDevice(deviceSlotId: string) {
   });
 }
 
+export function activateDeviceEmergency(deviceSlotId: string) {
+  return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}/emergency`, {
+    method: 'POST',
+  });
+}
+
+export function deactivateDeviceEmergency(deviceSlotId: string) {
+  return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}/emergency`, {
+    method: 'DELETE',
+  });
+}
+
 export function createDeviceShareLink(
   deviceSlotId: string,
   body: { recipient_name: string; expires_in_hours?: number },

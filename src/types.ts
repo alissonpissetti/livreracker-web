@@ -86,6 +86,8 @@ export type AccountDevice = {
   is_active: boolean;
   awaiting_activation: boolean;
   order_id?: string;
+  emergency_until?: string | null;
+  emergency_active?: boolean;
 };
 
 export type DeviceLocation = {

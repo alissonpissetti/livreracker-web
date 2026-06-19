@@ -7,6 +7,7 @@ import { TrackingMap } from '../components/TrackingMap';
 import { DailyTimeline } from '../components/DailyTimeline';
 import { RegisteredPointsPanel } from '../components/RegisteredPointsPanel';
 import { ShareTrackingPanel } from '../components/ShareTrackingPanel';
+import { EmergencyModePanel } from '../components/EmergencyModePanel';
 import { DEFAULT_DEVICE_ICON, isDeviceIcon } from '../constants/deviceIcons';
 import type { AccountDevice, DeviceLocation } from '../types';
 import { splitLocations, applyLocationQuality } from '../utils/locationOutliers';
@@ -20,6 +21,7 @@ import {
 import { formatRecordedDateTime, recordedAtMs } from '../utils/recordedTime';
 
 const LIVE_POLL_MS = 8_000;
+const LIVE_POLL_EMERGENCY_MS = 5_000;
 
 type DetailTab = 'timeline' | 'points';
 type ViewMode = 'live' | 'history';
@@ -273,13 +275,14 @@ export function DeviceTrackingPage() {
       }
     }
 
-    const timer = window.setInterval(pollLatest, LIVE_POLL_MS);
+    const pollInterval = device?.emergency_active ? LIVE_POLL_EMERGENCY_MS : LIVE_POLL_MS;
+    const timer = window.setInterval(pollLatest, pollInterval);
 
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [canUseLive, deviceId, viewMode, loading, range.from, range.to]);
+  }, [canUseLive, deviceId, viewMode, loading, range.from, range.to, device?.emergency_active]);
 
   const icon = device && isDeviceIcon(device.icon) ? device.icon : DEFAULT_DEVICE_ICON;
   const title = device?.label ?? 'Rastreador';
@@ -368,6 +371,15 @@ export function DeviceTrackingPage() {
                 onChange={(event) => setSelectedDate(event.target.value)}
               />
             </label>
+          ) : null}
+
+          {viewMode === 'live' && device?.device_id && !loading ? (
+            <EmergencyModePanel
+              deviceSlotId={deviceId}
+              device={device}
+              disabled={!device.is_active}
+              onDeviceChange={setDevice}
+            />
           ) : null}
 
           {device?.device_id && !loading ? (
