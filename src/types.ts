@@ -27,6 +27,13 @@ export type Product = {
   price_cents: number;
   price_label: string;
   subscription_days?: number;
+  compare_at_price_cents?: number;
+  compare_at_price_label?: string;
+  monthly_price_label?: string;
+  compare_at_monthly_label?: string;
+  included_months?: number;
+  promo_label?: string;
+  renewal_monthly_label?: string;
 };
 
 export type CartItem = {
@@ -34,29 +41,21 @@ export type CartItem = {
   quantity: number;
 };
 
-export type CheckoutResult = {
-  order_id: string;
-  subtotal_cents: number;
-  subtotal_label: string;
-  discount_cents: number;
-  discount_label: string;
-  total_cents: number;
-  total_label: string;
-  voucher_code: string | null;
-  devices_created: number;
-  subscription_ids: string[];
-  message: string;
-};
+export type PaymentMethod = 'pix' | 'creditCard';
 
 export type VoucherPreview = {
   valid: boolean;
   subtotal_cents: number;
   discount_cents: number;
+  payment_discount_cents?: number;
   total_cents: number;
   subtotal_label: string;
   discount_label: string;
+  payment_discount_label?: string;
   total_label: string;
   voucher_code: string | null;
+  payment_method?: PaymentMethod;
+  pix_discount_percent?: number | null;
   message: string;
 };
 
@@ -82,7 +81,11 @@ export type AccountDevice = {
   icon: string;
   device_id?: string;
   status: string;
+  current_period_start: string;
   current_period_end: string;
+  period_days: number;
+  period_label: string;
+  days_remaining: number;
   is_active: boolean;
   awaiting_activation: boolean;
   order_id?: string;

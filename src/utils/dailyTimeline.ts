@@ -212,6 +212,114 @@ function extendStopsUntilNextMovement(segments: TimelineSegment[]): TimelineSegm
   });
 }
 
+function stopsAreAtSamePlace(a: TimelineSegment, b: TimelineSegment): boolean {
+  return (
+    haversineMeters(a.centroidLat, a.centroidLng, b.centroidLat, b.centroidLng) <=
+    STOP_RADIUS_M
+  );
+}
+
+function isInsignificantMove(segment: TimelineSegment): boolean {
+  return segment.kind === 'move' && segment.distanceM < MIN_MOVE_DISTANCE_M;
+}
+
+function weightedCentroid(
+  segments: TimelineSegment[],
+): { lat: number; lng: number } {
+  let lat = 0;
+  let lng = 0;
+  let points = 0;
+
+  for (const segment of segments) {
+    lat += segment.centroidLat * segment.pointCount;
+    lng += segment.centroidLng * segment.pointCount;
+    points += segment.pointCount;
+  }
+
+  if (points === 0) {
+    return { lat: segments[0].centroidLat, lng: segments[0].centroidLng };
+  }
+
+  return { lat: lat / points, lng: lng / points };
+}
+
+function mergeStopSegments(segments: TimelineSegment[]): TimelineSegment {
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  const center = weightedCentroid(segments);
+  const pointCount = segments.reduce((total, segment) => total + segment.pointCount, 0);
+  const durationSec = Math.max(
+    (recordedAtMs(last.endAt) - recordedAtMs(first.startAt)) / 1000,
+    0,
+  );
+
+  return {
+    id: `stop-${first.startIndex}-${last.endIndex}`,
+    kind: 'stop',
+    color: first.color,
+    colorIndex: first.colorIndex,
+    startAt: first.startAt,
+    endAt: last.endAt,
+    startIndex: first.startIndex,
+    endIndex: last.endIndex,
+    pointCount,
+    centroidLat: center.lat,
+    centroidLng: center.lng,
+    distanceM: 0,
+    durationSec,
+  };
+}
+
+/** Une paradas no mesmo local separadas por micro-deslocamentos (ruído LBS/GPS). */
+function mergeAdjacentStopsAtSamePlace(segments: TimelineSegment[]): TimelineSegment[] {
+  if (segments.length < 2) {
+    return segments;
+  }
+
+  const merged: TimelineSegment[] = [];
+  let index = 0;
+
+  while (index < segments.length) {
+    const current = segments[index];
+    if (current.kind !== 'stop') {
+      merged.push(current);
+      index += 1;
+      continue;
+    }
+
+    const group: TimelineSegment[] = [current];
+    index += 1;
+
+    while (index < segments.length) {
+      const next = segments[index];
+
+      if (next.kind === 'stop' && stopsAreAtSamePlace(group[0], next)) {
+        group.push(next);
+        index += 1;
+        continue;
+      }
+
+      if (
+        next.kind === 'move' &&
+        isInsignificantMove(next) &&
+        index + 1 < segments.length &&
+        segments[index + 1].kind === 'stop' &&
+        stopsAreAtSamePlace(group[0], segments[index + 1])
+      ) {
+        group.push(next, segments[index + 1]);
+        index += 2;
+        continue;
+      }
+
+      break;
+    }
+
+    merged.push(group.length === 1 ? group[0] : mergeStopSegments(group));
+  }
+
+  return merged;
+}
+
 export function buildDailyTimeline(locations: DeviceLocation[]): DailyTimeline {
   const indexed = toIndexedPoints(locations);
 
@@ -256,7 +364,7 @@ export function buildDailyTimeline(locations: DeviceLocation[]): DailyTimeline {
   }
 
   return {
-    segments: extendStopsUntilNextMovement(segments),
+    segments: mergeAdjacentStopsAtSamePlace(extendStopsUntilNextMovement(segments)),
     dayStartAt: indexed[0].point.recorded_at,
     dayEndAt: indexed[indexed.length - 1].point.recorded_at,
   };
@@ -273,6 +381,13 @@ export function formatTimelineTimeRange(segment: TimelineSegment): string {
     return start;
   }
   return `${start} → ${end}`;
+}
+
+export function stopDurationSec(segment: TimelineSegment): number {
+  return Math.max(
+    (recordedAtMs(segment.endAt) - recordedAtMs(segment.startAt)) / 1000,
+    0,
+  );
 }
 
 export function formatCoordinatesLabel(lat: number, lng: number): string {

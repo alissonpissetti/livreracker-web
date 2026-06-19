@@ -11,12 +11,20 @@ import type {
   AdminUserDetail,
   AdminVoucher,
   AuthResponse,
-  CheckoutResult,
   PhoneLoginRequestResponse,
   Product,
   User,
   VoucherPreview,
 } from '../types';
+import type {
+  CheckoutCreateResult,
+  CheckPaymentResult,
+  PayOrderResult,
+  PixQrResult,
+  RenewalPlan,
+  StoreOrder,
+} from '../types/store';
+import { presentProduct } from '../utils/productPresentation';
 
 const API_BASE = import.meta.env.VITE_API_URL ?? '';
 const TOKEN_KEY = 'livre_tracker_token';
@@ -162,14 +170,30 @@ export function getMe() {
 }
 
 export function getProducts() {
-  return api<Product[]>('/v1/store/products', { auth: false });
+  return api<Product[]>('/v1/store/products', { auth: false }).then((items) =>
+    items.map(presentProduct),
+  );
+}
+
+export function getRenewalPlans() {
+  return api<{ plans: RenewalPlan[] }>('/v1/store/renewal/plans');
+}
+
+export function createRenewalCheckout(subscriptionId: string, planSlug: string) {
+  return api<CheckoutCreateResult>('/v1/store/renewal/checkout', {
+    method: 'POST',
+    body: JSON.stringify({
+      subscription_id: subscriptionId,
+      plan_slug: planSlug,
+    }),
+  });
 }
 
 export function checkout(
   items: { product_slug: string; quantity: number }[],
   voucherCode?: string,
 ) {
-  return api<CheckoutResult>('/v1/store/checkout', {
+  return api<CheckoutCreateResult>('/v1/store/checkout', {
     method: 'POST',
     body: JSON.stringify({
       items,
@@ -178,13 +202,87 @@ export function checkout(
   });
 }
 
+export function getStoreOrder(orderId: string) {
+  return api<StoreOrder>(`/v1/store/orders/${orderId}`);
+}
+
+export function identifyStoreClient(
+  orderId: string,
+  data: { name: string; cpf: string; phone: string; email: string },
+) {
+  return api<{ ok: boolean }>(`/v1/store/orders/${orderId}/identify-client`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function payStoreOrder(
+  orderId: string,
+  paymentData: {
+    paymentMethod: 'pix' | 'creditCard';
+    installments?: number;
+    creditCard?: {
+      holderName: string;
+      number: string;
+      expiryMonth: string;
+      expiryYear: string;
+      ccv: string;
+    };
+    creditCardHolderInfo?: {
+      name: string;
+      email: string;
+      cpfCnpj: string;
+      postalCode: string;
+      addressNumber: string;
+      addressComplement?: string | null;
+      phone: string;
+      mobilePhone: string;
+    };
+  },
+) {
+  const installments = Number(paymentData.installments);
+  return api<PayOrderResult>(`/v1/store/orders/${orderId}/pay`, {
+    method: 'POST',
+    body: JSON.stringify({
+      ...paymentData,
+      installments:
+        Number.isFinite(installments) && installments >= 1
+          ? Math.min(3, Math.floor(installments))
+          : 1,
+    }),
+  });
+}
+
+export function getStoreOrderPix(orderId: string) {
+  return api<PixQrResult>(`/v1/store/orders/${orderId}/pix`);
+}
+
+export function checkStoreOrderPayment(orderId: string) {
+  return api<CheckPaymentResult>(`/v1/store/orders/${orderId}/check`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function cancelStorePendingPayment(orderId: string) {
+  return api<{ ok: boolean; cancelled: number }>(
+    `/v1/store/orders/${orderId}/cancel-pending-payment`,
+    { method: 'POST', body: JSON.stringify({}) },
+  );
+}
+
 export function previewVoucher(
   items: { product_slug: string; quantity: number }[],
   voucherCode: string,
+  paymentMethod: 'pix' | 'creditCard' = 'pix',
 ) {
   return api<VoucherPreview>('/v1/store/voucher/preview', {
     method: 'POST',
-    body: JSON.stringify({ items, voucher_code: voucherCode }),
+    body: JSON.stringify({
+      items,
+      voucher_code: voucherCode,
+      payment_method: paymentMethod,
+    }),
   });
 }
 
@@ -227,13 +325,6 @@ export function getDeviceLocations(
   return api<DeviceLocationsResponse>(
     `/v1/account/devices/${deviceSlotId}/locations${query ? `?${query}` : ''}`,
   );
-}
-
-export function renewDevice(deviceSlotId: string) {
-  return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}/renew`, {
-    method: 'PATCH',
-    body: JSON.stringify({ days: 30 }),
-  });
 }
 
 export function activateDeviceEmergency(deviceSlotId: string) {

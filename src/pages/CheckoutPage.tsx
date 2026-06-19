@@ -1,11 +1,27 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { checkout, getProducts, previewVoucher } from '../api/client';
-import type { CartItem, Product, VoucherPreview } from '../types';
+import type { CartItem, PaymentMethod, Product, VoucherPreview } from '../types';
 
 type CheckoutState = {
   items: CartItem[];
 };
+
+const PIX_DISCOUNT_PERCENT = 5;
+
+function computeTotals(
+  subtotalCents: number,
+  voucherDiscountCents: number,
+  paymentMethod: PaymentMethod,
+) {
+  const afterVoucher = Math.max(0, subtotalCents - voucherDiscountCents);
+  const paymentDiscountCents =
+    paymentMethod === 'pix'
+      ? Math.round((afterVoucher * PIX_DISCOUNT_PERCENT) / 100)
+      : 0;
+  const totalCents = Math.max(0, afterVoucher - paymentDiscountCents);
+  return { afterVoucher, paymentDiscountCents, totalCents };
+}
 
 export function CheckoutPage() {
   const navigate = useNavigate();
@@ -17,9 +33,9 @@ export function CheckoutPage() {
   const [loading, setLoading] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
   const [voucherCode, setVoucherCode] = useState('');
   const [preview, setPreview] = useState<VoucherPreview | null>(null);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('pix');
 
   useEffect(() => {
     getProducts().then(setProducts).catch(() => undefined);
@@ -46,23 +62,17 @@ export function CheckoutPage() {
     .filter((line) => line?.type === 'hardware')
     .reduce((sum, line) => sum + (line?.quantity ?? 0), 0);
 
-  const discountCents = preview?.valid ? preview.discount_cents : 0;
-  const totalCents = preview?.valid ? preview.total_cents : subtotalCents;
+  const voucherDiscountCents = preview?.valid ? preview.discount_cents : 0;
+  const totals = useMemo(
+    () => computeTotals(subtotalCents, voucherDiscountCents, paymentMethod),
+    [subtotalCents, voucherDiscountCents, paymentMethod],
+  );
 
-  const subtotalLabel = (subtotalCents / 100).toLocaleString('pt-BR', {
-    style: 'currency',
-    currency: 'BRL',
-  });
-
-  const discountLabel = (discountCents / 100).toLocaleString('pt-BR', {
-    style: 'currency',
-    currency: 'BRL',
-  });
-
-  const totalLabel = (totalCents / 100).toLocaleString('pt-BR', {
-    style: 'currency',
-    currency: 'BRL',
-  });
+  const formatMoney = (cents: number) =>
+    (cents / 100).toLocaleString('pt-BR', {
+      style: 'currency',
+      currency: 'BRL',
+    });
 
   async function onApplyVoucher() {
     setError('');
@@ -70,7 +80,7 @@ export function CheckoutPage() {
     setPreviewLoading(true);
 
     try {
-      const result = await previewVoucher(items, voucherCode);
+      const result = await previewVoucher(items, voucherCode, paymentMethod);
       if (!result.valid) {
         throw new Error(result.message);
       }
@@ -88,10 +98,17 @@ export function CheckoutPage() {
     try {
       const appliedCode = preview?.valid ? preview.voucher_code ?? voucherCode : undefined;
       const result = await checkout(items, appliedCode ?? undefined);
-      setSuccess(result.message);
-      setTimeout(() => navigate('/conta'), 1500);
+
+      if (result.status === 'paid') {
+        navigate(result.redirect_to ?? '/conta');
+        return;
+      }
+
+      navigate(result.redirect_to ?? `/pagar/${result.order_id}`, {
+        state: { paymentMethod },
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Falha no checkout');
+      setError(err instanceof Error ? err.message : 'Falha ao criar pedido');
     } finally {
       setLoading(false);
     }
@@ -114,7 +131,7 @@ export function CheckoutPage() {
     <div className="container page checkout-page">
       <div className="page-head">
         <h1>Confirmar pedido</h1>
-        <p>Pagamento simulado — o pedido entra na sua conta imediatamente.</p>
+        <p>Revise os itens e continue para o pagamento.</p>
       </div>
 
       <div className="checkout-grid">
@@ -122,8 +139,33 @@ export function CheckoutPage() {
           <h2>Resumo da compra</h2>
           <p className="muted">
             Serão criados <strong>{hardwareCount}</strong> slot(s) de equipamento
-            para você ativar o IMEI quando receber cada unidade.
+            após a confirmação do pagamento.
           </p>
+
+          <div className="payment-methods">
+            <button
+              type="button"
+              className={`payment-method-option${paymentMethod === 'pix' ? ' active' : ''}`}
+              onClick={() => {
+                setPaymentMethod('pix');
+                setPreview(null);
+              }}
+            >
+              <strong>PIX à vista</strong>
+              <span>5% de desconto no pagamento</span>
+            </button>
+            <button
+              type="button"
+              className={`payment-method-option${paymentMethod === 'creditCard' ? ' active' : ''}`}
+              onClick={() => {
+                setPaymentMethod('creditCard');
+                setPreview(null);
+              }}
+            >
+              <strong>Cartão de crédito</strong>
+              <span>Até 3x sem juros</span>
+            </button>
+          </div>
 
           <div className="inline-form compact-form voucher-form">
             <input
@@ -152,14 +194,13 @@ export function CheckoutPage() {
           ) : null}
 
           {error ? <p className="error-text">{error}</p> : null}
-          {success ? <p className="success-text">{success}</p> : null}
           <button
             className="btn btn-primary"
             type="button"
             disabled={loading || hardwareCount === 0}
             onClick={onConfirm}
           >
-            {loading ? 'Processando...' : `Confirmar · ${totalLabel}`}
+            {loading ? 'Criando pedido...' : 'Continuar para pagamento'}
           </button>
         </div>
 
@@ -172,29 +213,30 @@ export function CheckoutPage() {
                   <span>
                     {line.quantity}x {line.name}
                   </span>
-                  <strong>
-                    {(line.lineTotal / 100).toLocaleString('pt-BR', {
-                      style: 'currency',
-                      currency: 'BRL',
-                    })}
-                  </strong>
+                  <strong>{formatMoney(line.lineTotal)}</strong>
                 </li>
               ) : null,
             )}
           </ul>
           <div className="summary-total">
             <span>Subtotal</span>
-            <strong>{subtotalLabel}</strong>
+            <strong>{formatMoney(subtotalCents)}</strong>
           </div>
-          {discountCents > 0 ? (
+          {voucherDiscountCents > 0 ? (
             <div className="summary-total discount-line">
-              <span>Desconto</span>
-              <strong>- {discountLabel}</strong>
+              <span>Desconto voucher</span>
+              <strong>- {formatMoney(voucherDiscountCents)}</strong>
+            </div>
+          ) : null}
+          {totals.paymentDiscountCents > 0 ? (
+            <div className="summary-total discount-line">
+              <span>Desconto PIX (5%)</span>
+              <strong>- {formatMoney(totals.paymentDiscountCents)}</strong>
             </div>
           ) : null}
           <div className="summary-total">
-            <span>Total</span>
-            <strong>{totalLabel}</strong>
+            <span>Total estimado</span>
+            <strong>{formatMoney(totals.totalCents)}</strong>
           </div>
         </aside>
       </div>

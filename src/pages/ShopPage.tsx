@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getProducts } from '../api/client';
+import { ProductPrice } from '../components/ProductPrice';
 import { useAuth } from '../context/AuthContext';
 import type { Product } from '../types';
 
@@ -64,7 +65,8 @@ export function ShopPage() {
       <div className="page-head">
         <h1>Loja</h1>
         <p>
-          Cada kit gera um slot na sua conta. Compre quantas unidades precisar.
+          Cada kit rastreador LT gera um slot na sua conta. Compre quantas unidades
+          precisar.
         </p>
       </div>
 
@@ -78,7 +80,7 @@ export function ShopPage() {
             </div>
             <h2>{product.name}</h2>
             <p>{product.description}</p>
-            <p className="price">{product.price_label}</p>
+            <ProductPrice product={product} />
             <label>
               Quantidade
               <input

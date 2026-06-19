@@ -5,6 +5,7 @@ import { DeviceBatteryBadge } from '../components/DeviceBatteryBadge';
 import { DeviceIconGlyph } from '../components/DeviceIcon';
 import { TrackingMap } from '../components/TrackingMap';
 import { DailyTimeline } from '../components/DailyTimeline';
+import { LiveStopBanner } from '../components/LiveStopBanner';
 import { RegisteredPointsPanel } from '../components/RegisteredPointsPanel';
 import { ShareTrackingPanel } from '../components/ShareTrackingPanel';
 import { EmergencyModePanel } from '../components/EmergencyModePanel';
@@ -13,6 +14,10 @@ import { DEFAULT_DEVICE_ICON, isDeviceIcon } from '../constants/deviceIcons';
 import type { AccountDevice, DeviceLocation } from '../types';
 import { splitLocations, applyLocationQuality } from '../utils/locationOutliers';
 import { buildDailyTimeline } from '../utils/dailyTimeline';
+import {
+  applyLiveStopExtension,
+  resolveLiveStopStatus,
+} from '../utils/liveStopStatus';
 import {
   readTrackingViewMode,
   writeTrackingViewMode,
@@ -96,6 +101,7 @@ export function DeviceTrackingPage() {
   const [pointExplorerOpen, setPointExplorerOpen] = useState(false);
   const [validPointIndex, setValidPointIndex] = useState<number | null>(null);
   const lastReceivedRef = useRef<string | null>(null);
+  const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
 
   const setViewMode = useCallback(
     (mode: TrackingViewMode, persist = true) => {
@@ -146,6 +152,24 @@ export function DeviceTrackingPage() {
     () => buildDailyTimeline(qualityLocations),
     [qualityLocations],
   );
+  const liveStopStatus = useMemo(
+    () =>
+      viewMode === 'live' && isSelectedToday
+        ? resolveLiveStopStatus(
+            validLocations,
+            dailyTimeline.segments,
+            liveNowMs,
+          )
+        : null,
+    [viewMode, isSelectedToday, validLocations, dailyTimeline.segments, liveNowMs],
+  );
+  const displayTimelineSegments = useMemo(
+    () =>
+      viewMode === 'live'
+        ? applyLiveStopExtension(dailyTimeline.segments, liveStopStatus, liveNowMs)
+        : dailyTimeline.segments,
+    [viewMode, dailyTimeline.segments, liveStopStatus, liveNowMs],
+  );
   const latestBatteryReading = useMemo(() => {
     for (let index = qualityLocations.length - 1; index >= 0; index -= 1) {
       const point = qualityLocations[index];
@@ -163,23 +187,23 @@ export function DeviceTrackingPage() {
   }, [qualityLocations]);
   const mapLive = viewMode === 'live' && isSelectedToday;
   const defaultSegmentId = useMemo(() => {
-    const firstMove = dailyTimeline.segments.find((segment) => segment.kind === 'move');
-    return firstMove?.id ?? dailyTimeline.segments[0]?.id ?? null;
-  }, [dailyTimeline.segments]);
+    const firstMove = displayTimelineSegments.find((segment) => segment.kind === 'move');
+    return firstMove?.id ?? displayTimelineSegments[0]?.id ?? null;
+  }, [displayTimelineSegments]);
   const activeSegmentId = useMemo(() => {
-    if (dailyTimeline.segments.length === 0) {
+    if (displayTimelineSegments.length === 0) {
       return null;
     }
 
     if (
       selectedSegmentId &&
-      dailyTimeline.segments.some((segment) => segment.id === selectedSegmentId)
+      displayTimelineSegments.some((segment) => segment.id === selectedSegmentId)
     ) {
       return selectedSegmentId;
     }
 
     return defaultSegmentId;
-  }, [dailyTimeline.segments, defaultSegmentId, selectedSegmentId]);
+  }, [displayTimelineSegments, defaultSegmentId, selectedSegmentId]);
 
   useEffect(() => {
     setSelectedSegmentId(null);
@@ -319,22 +343,40 @@ export function DeviceTrackingPage() {
     };
   }, [canUseLive, deviceId, viewMode, loading, range.from, range.to, device?.emergency_active]);
 
+  useEffect(() => {
+    if (!canUseLive || viewMode !== 'live') {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setLiveNowMs(Date.now());
+    }, 30_000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [canUseLive, viewMode]);
+
   const icon = device && isDeviceIcon(device.icon) ? device.icon : DEFAULT_DEVICE_ICON;
   const title = device?.label ?? 'Rastreador';
 
   return (
     <div className="container page">
       <div className="page-head tracking-page-head">
-        <div>
-          <Link className="muted tracking-back" to="/conta">
-            ← Voltar para minha conta
+        <div className="tracking-page-intro">
+          <Link className="tracking-back" to="/conta">
+            <span className="tracking-back-icon" aria-hidden="true">
+              ←
+            </span>
+            Voltar para minha conta
           </Link>
-          <div className="tracking-title-row">
-            <div className="device-icon-badge" aria-hidden="true">
-              <DeviceIconGlyph icon={icon} size={28} />
+
+          <div className="tracking-hero">
+            <div className="tracking-hero-icon" aria-hidden="true">
+              <DeviceIconGlyph icon={icon} size={30} />
             </div>
-            <div className="tracking-title-copy">
-              <div className="tracking-title-line">
+            <div className="tracking-hero-copy">
+              <div className="tracking-hero-title">
                 <h1>{title}</h1>
                 {!loading && latestBatteryReading ? (
                   <DeviceBatteryBadge
@@ -343,15 +385,21 @@ export function DeviceTrackingPage() {
                   />
                 ) : null}
               </div>
-              <p className="muted">
-                {device?.device_id
-                  ? mapLive
-                    ? `IMEI ${device.device_id} · acompanhamento ao vivo`
-                    : `IMEI ${device.device_id} · histórico de posições`
-                  : mapLive
-                    ? 'Acompanhamento ao vivo'
-                    : 'Histórico de posições'}
-              </p>
+              <div className="tracking-hero-meta">
+                {device?.device_id ? (
+                  <span className="tracking-identifier">
+                    Identificador {device.device_id}
+                  </span>
+                ) : null}
+                {mapLive ? (
+                  <span className="tracking-status tracking-status-live">
+                    <span className="tracking-status-dot" aria-hidden="true" />
+                    Acompanhamento ao vivo
+                  </span>
+                ) : (
+                  <span className="tracking-status">Histórico de posições</span>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -425,6 +473,10 @@ export function DeviceTrackingPage() {
 
       {error ? <p className="error-text">{error}</p> : null}
 
+      {isSelectedToday && !loading ? (
+        <LiveStopBanner status={liveStopStatus} active={canUseLive} />
+      ) : null}
+
       {!loading && viewMode === 'history' && routeStats ? (
         <section className="tracking-route-stats card" aria-label="Resumo do trajeto">
           <div className="tracking-route-stats-grid">
@@ -473,7 +525,7 @@ export function DeviceTrackingPage() {
         resetKey={selectedDate}
         live={mapLive}
         showFullDayRoute={viewMode === 'history'}
-        segments={dailyTimeline.segments}
+        segments={displayTimelineSegments}
         selectedSegmentId={activeSegmentId}
         pointExplorerOpen={pointExplorerOpen}
         validPointIndex={validPointIndex}
@@ -521,7 +573,7 @@ export function DeviceTrackingPage() {
               >
                 <DailyTimeline
                   embedded
-                  segments={dailyTimeline.segments}
+                  segments={displayTimelineSegments}
                   selectedSegmentId={activeSegmentId}
                   onSelectSegment={handleSelectSegment}
                 />

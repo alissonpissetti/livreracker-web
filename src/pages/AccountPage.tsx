@@ -4,7 +4,6 @@ import {
   activateDevice,
   getDevices,
   getOrders,
-  renewDevice,
   updateDevice,
 } from '../api/client';
 import { AccountDeviceCard } from '../components/AccountDeviceCard';
@@ -61,20 +60,6 @@ export function AccountPage() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Falha ao ativar IMEI');
-    } finally {
-      setActionId('');
-    }
-  }
-
-  async function onRenew(slotId: string) {
-    setActionId(slotId);
-    setError('');
-    try {
-      await renewDevice(slotId);
-      setSuccess('Assinatura renovada por mais 30 dias.');
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Falha ao renovar');
     } finally {
       setActionId('');
     }
@@ -169,7 +154,6 @@ export function AccountPage() {
                     busy={actionId === device.id}
                     imeiValue=""
                     onImeiChange={() => {}}
-                    onRenew={() => onRenew(device.id)}
                     onSaveProfile={(label, icon) =>
                       onSaveProfile(device.id, label, icon)
                     }

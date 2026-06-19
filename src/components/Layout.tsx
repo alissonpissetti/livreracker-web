@@ -1,9 +1,29 @@
 import { Link, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { SiteNav, type SiteNavItem } from './SiteNav';
 
 export function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+
+  const navItems: SiteNavItem[] = user
+    ? [
+        { type: 'link', to: '/loja', label: 'Equipamentos' },
+        { type: 'link', to: '/conta', label: 'Minha conta' },
+        {
+          type: 'button',
+          label: 'Sair',
+          onClick: () => {
+            logout();
+            navigate('/');
+          },
+        },
+      ]
+    : [
+        { type: 'link', to: '/loja', label: 'Equipamentos' },
+        { type: 'link', to: '/entrar', label: 'Entrar' },
+        { type: 'link', to: '/cadastro', label: 'Criar conta', className: 'nav-cta' },
+      ];
 
   return (
     <div className="app">
@@ -11,33 +31,9 @@ export function Layout() {
         <div className="container header-inner">
           <Link to="/" className="brand">
             <span className="brand-mark">LT</span>
-            <span>LIVRE TRACKER</span>
+            <span className="brand-text">LIVRE TRACKER</span>
           </Link>
-          <nav className="nav">
-            <Link to="/loja">Equipamentos</Link>
-            {user ? (
-              <>
-                <Link to="/conta">Minha conta</Link>
-                <button
-                  type="button"
-                  className="link-button"
-                  onClick={() => {
-                    logout();
-                    navigate('/');
-                  }}
-                >
-                  Sair
-                </button>
-              </>
-            ) : (
-              <>
-                <Link to="/entrar">Entrar</Link>
-                <Link to="/cadastro" className="nav-cta">
-                  Criar conta
-                </Link>
-              </>
-            )}
-          </nav>
+          <SiteNav items={navItems} />
         </div>
       </header>
 
@@ -48,7 +44,6 @@ export function Layout() {
       <footer className="footer">
         <div className="container footer-inner">
           <p>© {new Date().getFullYear()} LIVRE TRACKER — rastreamento GPS inteligente</p>
-          <p className="muted">LilyGO T-SIM7080G · NB-IoT / LTE-M · LBS + GPS</p>
         </div>
       </footer>
     </div>

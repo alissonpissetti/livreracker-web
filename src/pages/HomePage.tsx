@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { ProductPrice } from '../components/ProductPrice';
 import { useAuth } from '../context/AuthContext';
 
 export function HomePage() {
@@ -8,12 +9,14 @@ export function HomePage() {
     <section className="hero">
       <div className="container hero-grid">
         <div>
-          <p className="eyebrow">Rastreamento para veículos e frotas</p>
-          <h1>Crie sua conta, compre rastreadores e ative cada IMEI</h1>
+          <p className="eyebrow">Rastreamento simples para veículos e frotas</p>
+          <h1>Sua conta, seus kits, tudo em um só lugar</h1>
           <p className="lead">
-            Uma conta para todos os seus equipamentos: pedidos, assinaturas e
-            ativação do device_id quando o kit chegar.
+            Compre o kit rastreador LT com 12 meses de uso incluídos — sem
+            mensalidade no 1º ano. A partir do 2º ano, renove em planos de 6 ou
+            12 meses por R$ 25,90/mês.
           </p>
+          <ProductPrice />
           <div className="hero-actions">
             {user ? (
               <>
@@ -41,10 +44,13 @@ export function HomePage() {
           <h3>Fluxo na conta</h3>
           <ol className="steps">
             <li>Crie sua conta no LIVRE TRACKER</li>
-            <li>Compre 1 ou mais kits T-SIM7080G</li>
+            <li>Compre 1 ou mais kits rastreador LT</li>
             <li>Acompanhe os pedidos em Minha conta</li>
-            <li>Ao receber, ative o IMEI em cada equipamento</li>
-            <li>Renove a assinatura para manter o rastreio ativo</li>
+            <li>Ao receber, ative o identificador de cada equipamento</li>
+            <li>
+              Use o 1º ano sem mensalidade; depois, renove em 6 ou 12 meses por
+              R$ 25,90/mês
+            </li>
           </ol>
         </div>
       </div>

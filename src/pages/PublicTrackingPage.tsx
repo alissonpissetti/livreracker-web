@@ -4,9 +4,12 @@ import { getPublicTracking } from '../api/client';
 import { DeviceBatteryBadge } from '../components/DeviceBatteryBadge';
 import { DeviceIconGlyph } from '../components/DeviceIcon';
 import { TrackingMap } from '../components/TrackingMap';
+import { LiveStopBanner } from '../components/LiveStopBanner';
 import { DEFAULT_DEVICE_ICON, isDeviceIcon } from '../constants/deviceIcons';
 import type { DeviceLocation } from '../types';
 import { applyLocationQuality } from '../utils/locationOutliers';
+import { buildDailyTimeline } from '../utils/dailyTimeline';
+import { resolveLiveStopStatus } from '../utils/liveStopStatus';
 import { formatRecordedDateTime, recordedAtMs } from '../utils/recordedTime';
 
 const LIVE_POLL_MS = 8_000;
@@ -46,6 +49,25 @@ export function PublicTrackingPage() {
   const qualityLocations = useMemo(
     () => applyLocationQuality(locations),
     [locations],
+  );
+
+  const dailyTimeline = useMemo(
+    () => buildDailyTimeline(qualityLocations),
+    [qualityLocations],
+  );
+
+  const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setLiveNowMs(Date.now());
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const liveStopStatus = useMemo(
+    () => resolveLiveStopStatus(qualityLocations, dailyTimeline.segments, liveNowMs),
+    [qualityLocations, dailyTimeline.segments, liveNowMs],
   );
 
   const latestBatteryReading = useMemo(() => {
@@ -163,11 +185,17 @@ export function PublicTrackingPage() {
           </div>
         </div>
         {!loading && !error ? (
-          <span className="tracking-live-badge" aria-live="polite">
-            LIVE
-          </span>
+          <div className="tracking-live-controls">
+            <span className="tracking-live-badge" aria-live="polite">
+              LIVE
+            </span>
+          </div>
         ) : null}
       </div>
+
+      {!error && !loading ? (
+        <LiveStopBanner status={liveStopStatus} active />
+      ) : null}
 
       {error ? (
         <div className="card tracking-share-empty">

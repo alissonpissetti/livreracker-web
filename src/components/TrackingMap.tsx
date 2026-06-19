@@ -13,6 +13,10 @@ import { getGoogleMapId, loadGoogleMaps } from '../utils/googleMaps';
 import { haversineMeters } from '../utils/geo';
 import { isValidReading, validRoutePoints, effectiveCoordinate } from '../utils/locationOutliers';
 import {
+  collapseStationaryPoints,
+  isLocatedPoint,
+} from '../utils/liveMapPoints';
+import {
   markerRoleForIndex,
   markerZIndex,
   readingMarkerIcon,
@@ -49,7 +53,7 @@ const MAX_LIVE_ROUTE_POINTS = 20;
 const GPS_ANCHOR_MAX_GAP_M = 250;
 
 function isValidLocation(point: DeviceLocation): boolean {
-  return Number.isFinite(point.latitude) && Number.isFinite(point.longitude);
+  return isLocatedPoint(point);
 }
 
 function toLatLng(point: DeviceLocation): LatLng {
@@ -153,7 +157,7 @@ function tailPathPoints(
 }
 
 function liveRoutePoints(points: DeviceLocation[]): DeviceLocation[] {
-  const located = points.filter(isValidLocation);
+  const located = collapseStationaryPoints(points.filter(isValidLocation));
   if (located.length <= MAX_LIVE_ROUTE_POINTS) {
     return located;
   }
@@ -268,14 +272,18 @@ export function TrackingMap({
     routeLineRef.current?.setPath([]);
   }
 
-  function syncMarkers(map: google.maps.Map): void {
+  function syncMarkers(map: google.maps.Map, isLive: boolean): void {
     markersRef.current.forEach((entry) => {
       entry.marker.setMap(null);
     });
     markersRef.current = [];
 
+    const markerSource = isLive
+      ? collapseStationaryPoints(points)
+      : points;
+
     let validIndex = 0;
-    for (const point of points) {
+    for (const point of markerSource) {
       if (!isValidLocation(point)) {
         continue;
       }
@@ -993,7 +1001,7 @@ export function TrackingMap({
         providerRef.current = createRouteProvider(Route, MAPS_KEY);
         liveFitDoneRef.current = false;
 
-        syncMarkers(map);
+        syncMarkers(map, live);
 
         routeLineRef.current = new Polyline({
           map,
@@ -1073,7 +1081,7 @@ export function TrackingMap({
     if (!mapReady || !map || points.length === 0) {
       return;
     }
-    syncMarkers(map);
+    syncMarkers(map, live);
   }, [mapReady, points, live]);
 
   useEffect(() => {

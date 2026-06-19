@@ -8,6 +8,10 @@ import {
   isDeviceIcon,
 } from '../constants/deviceIcons';
 import type { AccountDevice } from '../types';
+import {
+  formatDaysRemaining,
+  formatDevicePeriodRange,
+} from '../utils/devicePeriod';
 
 type AccountDeviceCardProps = {
   device: AccountDevice;
@@ -15,12 +19,11 @@ type AccountDeviceCardProps = {
   imeiValue: string;
   onImeiChange: (value: string) => void;
   onActivate?: () => void;
-  onRenew?: () => void;
   onSaveProfile: (label: string, icon: DeviceIcon) => Promise<void>;
 };
 
 function deviceStatusLabel(device: AccountDevice) {
-  if (device.awaiting_activation) return 'Aguardando IMEI';
+  if (device.awaiting_activation) return 'Aguardando identificador';
   if (device.is_active) return 'Ativo';
   if (device.status === 'past_due') return 'Assinatura vencida';
   return device.status;
@@ -38,7 +41,6 @@ export function AccountDeviceCard({
   imeiValue,
   onImeiChange,
   onActivate,
-  onRenew,
   onSaveProfile,
 }: AccountDeviceCardProps) {
   const icon = isDeviceIcon(device.icon) ? device.icon : DEFAULT_DEVICE_ICON;
@@ -84,14 +86,40 @@ export function AccountDeviceCard({
           <h2>{trimmedLabel || device.label || 'Rastreador'}</h2>
           <p className="muted">
             {device.device_id
-              ? `IMEI: ${device.device_id}`
-              : 'Ainda sem IMEI vinculado'}
+              ? `Identificador: ${device.device_id}`
+              : 'Ainda sem identificador vinculado'}
           </p>
         </div>
         <span className={deviceStatusClass(device)}>
           {deviceStatusLabel(device)}
         </span>
       </div>
+
+      <section className="device-period-card" aria-label="Período do plano">
+        <div className="device-period-head">
+          <span className="device-period-title">Período do plano</span>
+          <span className="device-period-badge">{device.period_label}</span>
+        </div>
+        <p className="device-period-range">
+          {formatDevicePeriodRange(
+            device.current_period_start,
+            device.current_period_end,
+          )}
+        </p>
+        <p
+          className={`device-period-remaining${
+            device.days_remaining <= 30 ? ' device-period-remaining-warning' : ''
+          }`}
+        >
+          {formatDaysRemaining(device.days_remaining)}
+        </p>
+        {device.awaiting_activation ? (
+          <p className="device-period-note muted">
+            O período de {device.period_label} já está reservado para este
+            equipamento. Ative o identificador quando receber a unidade.
+          </p>
+        ) : null}
+      </section>
 
       <div className="device-profile-form">
         <label>
@@ -131,7 +159,7 @@ export function AccountDeviceCard({
       {device.awaiting_activation ? (
         <div className="inline-form">
           <label className="imei-field">
-            IMEI do equipamento
+            Identificador do equipamento
             <input
               placeholder="868123456789012"
               value={imeiValue}
@@ -148,40 +176,24 @@ export function AccountDeviceCard({
             Ativar equipamento
           </button>
         </div>
-      ) : (
-        <>
-          <dl className="meta-grid">
-            <div>
-              <dt>Válido até</dt>
-              <dd>
-                {new Date(device.current_period_end).toLocaleString('pt-BR')}
-              </dd>
-            </div>
-            <div>
-              <dt>Pedido</dt>
-              <dd>{device.order_id?.slice(0, 8) ?? '—'}</dd>
-            </div>
-          </dl>
-          {onRenew ? (
-            <div className="card-actions">
-              <Link
-                className="btn btn-secondary"
-                to={`/conta/rastreadores/${device.id}`}
-              >
-                Ver rastreios
-              </Link>
-              <button
-                className="btn btn-primary"
-                type="button"
-                disabled={busy}
-                onClick={onRenew}
-              >
-                Renovar +30 dias
-              </button>
-            </div>
-          ) : null}
-        </>
-      )}
+      ) : null}
+
+      <div className="card-actions">
+        {!device.awaiting_activation ? (
+          <Link
+            className="btn btn-secondary"
+            to={`/conta/rastreadores/${device.id}`}
+          >
+            Ver rastreios
+          </Link>
+        ) : null}
+        <Link
+          className={`btn btn-primary${device.awaiting_activation ? '' : ''}`}
+          to={`/conta/rastreadores/${device.id}/renovar`}
+        >
+          Renovar plano
+        </Link>
+      </div>
     </article>
   );
 }

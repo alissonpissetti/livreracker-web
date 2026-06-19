@@ -7,9 +7,11 @@ import { AuthProvider } from './context/AuthContext';
 import { AccountPage } from './pages/AccountPage';
 import { DeviceTrackingPage } from './pages/DeviceTrackingPage';
 import { CheckoutPage } from './pages/CheckoutPage';
+import { PayOrderPage } from './pages/PayOrderPage';
 import { HomePage } from './pages/HomePage';
 import { LoginPage } from './pages/LoginPage';
 import { RecoverPasswordPage } from './pages/RecoverPasswordPage';
+import { RenewDevicePage } from './pages/RenewDevicePage';
 import { PublicTrackingPage } from './pages/PublicTrackingPage';
 import { RegisterPage } from './pages/RegisterPage';
 import { ShopPage } from './pages/ShopPage';
@@ -41,10 +43,26 @@ export default function App() {
               }
             />
             <Route
+              path="pagar/:orderId"
+              element={
+                <ProtectedRoute>
+                  <PayOrderPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
               path="conta"
               element={
                 <ProtectedRoute>
                   <AccountPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="conta/rastreadores/:deviceId/renovar"
+              element={
+                <ProtectedRoute>
+                  <RenewDevicePage />
                 </ProtectedRoute>
               }
             />
