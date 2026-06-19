@@ -52,6 +52,36 @@ export async function snapToRoads(
   return snapped;
 }
 
+/** Traçado pela via entre pontos consecutivos (fallback leve da Roads API). */
+export async function snapInterpolatedRoadPath(
+  apiKey: string,
+  points: LatLng[],
+): Promise<LatLng[]> {
+  if (points.length < 2 || !apiKey) {
+    return points.map((point) => ({ ...point }));
+  }
+
+  const pathParam = points.map((point) => `${point.lat},${point.lng}`).join('|');
+  const url =
+    `https://roads.googleapis.com/v1/snapToRoads?interpolate=true&path=${encodeURIComponent(pathParam)}` +
+    `&key=${encodeURIComponent(apiKey)}`;
+
+  const response = await fetch(url);
+  const data = (await response.json()) as SnapResponse;
+
+  if (!response.ok) {
+    const message = data.error?.message ?? `Roads API ${response.status}`;
+    throw new Error(message);
+  }
+
+  const path: LatLng[] = (data.snappedPoints ?? []).map((entry) => ({
+    lat: entry.location.latitude,
+    lng: entry.location.longitude,
+  }));
+
+  return path.length >= 2 ? path : points.map((point) => ({ ...point }));
+}
+
 /** Garante que o path da rota começa/termina nas vias encaixadas das leituras. */
 export function anchorPathToSnappedWaypoints(
   path: LatLng[],

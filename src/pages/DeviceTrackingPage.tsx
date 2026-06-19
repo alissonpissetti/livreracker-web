@@ -34,7 +34,6 @@ import { formatRecordedDateTime, recordedAtMs } from '../utils/recordedTime';
 const LIVE_POLL_MS = 8_000;
 const LIVE_POLL_EMERGENCY_MS = 5_000;
 
-type DetailTab = 'timeline' | 'points';
 
 function toDateInputValue(date: Date): string {
   const year = date.getFullYear();
@@ -97,7 +96,6 @@ export function DeviceTrackingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<DetailTab>('timeline');
   const [pointExplorerOpen, setPointExplorerOpen] = useState(false);
   const [validPointIndex, setValidPointIndex] = useState<number | null>(null);
   const lastReceivedRef = useRef<string | null>(null);
@@ -207,7 +205,6 @@ export function DeviceTrackingPage() {
 
   useEffect(() => {
     setSelectedSegmentId(null);
-    setDetailTab('timeline');
     setPointExplorerOpen(false);
     setValidPointIndex(null);
   }, [selectedDate]);
@@ -536,65 +533,34 @@ export function DeviceTrackingPage() {
         />
       </div>
 
-      {viewMode === 'history' && !loading ? (
-        <section className="tracking-detail-tabs card" aria-label="Detalhes do dia">
-          <div className="tracking-tab-list" role="tablist" aria-label="Visualização dos dados">
-            <button
-              type="button"
-              role="tab"
-              id="tracking-tab-timeline"
-              aria-selected={detailTab === 'timeline'}
-              aria-controls="tracking-panel-timeline"
-              className={`tracking-tab${detailTab === 'timeline' ? ' tracking-tab-active' : ''}`}
-              onClick={() => setDetailTab('timeline')}
-            >
-              Linha do tempo
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="tracking-tab-points"
-              aria-selected={detailTab === 'points'}
-              aria-controls="tracking-panel-points"
-              className={`tracking-tab${detailTab === 'points' ? ' tracking-tab-active' : ''}`}
-              onClick={() => setDetailTab('points')}
-            >
-              Pontos registrados
-            </button>
-          </div>
-
+      {!loading && displayTimelineSegments.length > 0 ? (
+        <section className="tracking-detail-tabs card" aria-label="Linha do tempo do dia">
           <div className="tracking-tab-panels">
-            {detailTab === 'timeline' ? (
-              <div
-                role="tabpanel"
-                id="tracking-panel-timeline"
-                aria-labelledby="tracking-tab-timeline"
-                className="tracking-tab-panel"
-              >
-                <DailyTimeline
-                  embedded
-                  segments={displayTimelineSegments}
-                  selectedSegmentId={activeSegmentId}
-                  onSelectSegment={handleSelectSegment}
-                />
-              </div>
-            ) : (
-              <div
-                role="tabpanel"
-                id="tracking-panel-points"
-                aria-labelledby="tracking-tab-points"
-                className="tracking-tab-panel"
-              >
-                <RegisteredPointsPanel
-                  validLocations={validLocations}
-                  invalidLocations={invalidLocations}
-                  formatSpeed={formatSpeed}
-                  formatBattery={formatBattery}
-                  selectedIndex={pointExplorerOpen ? validPointIndex : null}
-                  onSelectPoint={handleValidPointSelect}
-                />
-              </div>
-            )}
+            <div className="tracking-tab-panel">
+              <DailyTimeline
+                embedded
+                segments={displayTimelineSegments}
+                selectedSegmentId={activeSegmentId}
+                onSelectSegment={handleSelectSegment}
+              />
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {viewMode === 'history' && !loading ? (
+        <section className="tracking-detail-tabs card" aria-label="Pontos registrados">
+          <div className="tracking-tab-panels">
+            <div className="tracking-tab-panel">
+              <RegisteredPointsPanel
+                validLocations={validLocations}
+                invalidLocations={invalidLocations}
+                formatSpeed={formatSpeed}
+                formatBattery={formatBattery}
+                selectedIndex={pointExplorerOpen ? validPointIndex : null}
+                onSelectPoint={handleValidPointSelect}
+              />
+            </div>
           </div>
         </section>
       ) : null}

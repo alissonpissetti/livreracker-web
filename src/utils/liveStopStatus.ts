@@ -7,8 +7,8 @@ import { timelineColorForIndex } from './timelineColors';
 
 /** Alinhado com STOP_SPEED_KNOTS no firmware ESP32. */
 const STOP_SPEED_KNOTS = 2;
-/** Raio para agrupar leituras no mesmo local parado (timeline usa 120 m). */
-const STOP_RADIUS_M = 120;
+/** Alinhado com STOP_RADIUS da timeline. */
+const STOP_RADIUS_M = 180;
 /** REPORT_INTERVAL_STOPPED_SEC (30 min) + margem para rede e detecção. */
 const MAX_SILENCE_MS = 45 * 60 * 1000;
 /** Intervalo entre heartbeats parados no firmware (30 min) + margem. */

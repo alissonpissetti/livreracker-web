@@ -6,7 +6,8 @@ import { formatDuration } from './routeStats';
 import { timelineColorForIndex } from './timelineColors';
 
 /** Raio máximo (m) para considerar pontos no mesmo local parado. */
-const STOP_RADIUS_M = 120;
+export const TIMELINE_STOP_RADIUS_M = 180;
+const STOP_RADIUS_M = TIMELINE_STOP_RADIUS_M;
 /** Tempo mínimo parado para registrar evento de parada. */
 const MIN_STOP_DURATION_MS = 5 * 60 * 1000;
 /** Lacuna entre leituras que inicia novo trecho. */
