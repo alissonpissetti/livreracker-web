@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { getDeviceLocations } from '../api/client';
+import {
+  getAccountDevice,
+  getDeviceLocations,
+  updateDevice,
+  updateDeviceAlerts,
+} from '../api/client';
 import { DeviceBatteryBadge } from '../components/DeviceBatteryBadge';
 import { DeviceIconGlyph } from '../components/DeviceIcon';
+import { DeviceSettingsPanel } from '../components/DeviceSettingsPanel';
+import type { DeviceAlertSettings } from '../components/DeviceSettingsPanel';
 import { TrackingMap } from '../components/TrackingMap';
 import { DailyTimeline } from '../components/DailyTimeline';
 import { LiveStopBanner } from '../components/LiveStopBanner';
@@ -10,10 +17,16 @@ import { RegisteredPointsPanel } from '../components/RegisteredPointsPanel';
 import { ShareTrackingPanel } from '../components/ShareTrackingPanel';
 import { EmergencyModePanel } from '../components/EmergencyModePanel';
 import { useAuth } from '../context/AuthContext';
-import { DEFAULT_DEVICE_ICON, isDeviceIcon } from '../constants/deviceIcons';
+import { DEFAULT_DEVICE_ICON, isDeviceIcon, type DeviceIcon } from '../constants/deviceIcons';
 import type { AccountDevice, DeviceLocation } from '../types';
 import { splitLocations, applyLocationQuality } from '../utils/locationOutliers';
-import { buildDailyTimeline } from '../utils/dailyTimeline';
+import {
+  buildAllDayStationarySegment,
+  buildDailyTimeline,
+  findStationaryAnchor,
+  resolveTodayAnchoredStationarySegment,
+  resolveTrailingStopExtension,
+} from '../utils/dailyTimeline';
 import {
   applyLiveStopExtension,
   resolveLiveStopStatus,
@@ -29,7 +42,22 @@ import {
   formatDistance,
   formatDuration,
 } from '../utils/routeStats';
-import { formatRecordedDateTime, recordedAtMs } from '../utils/recordedTime';
+import {
+  buildHistoryMapPoints,
+  buildLiveMapPoints,
+  filterLocationsForDay,
+} from '../utils/liveAnchorPoints';
+import { collapseNearbyPoints } from '../utils/liveMapPoints';
+import { formatMapPowerStatus } from '../utils/mapPointInfo';
+import {
+  getDevicePowerStatus,
+  isPowerStatusStale,
+} from '../utils/devicePowerStatus';
+import {
+  formatRecordedDateTime,
+  recordedAtMs,
+  recordedDayRangeIso,
+} from '../utils/recordedTime';
 
 const LIVE_POLL_MS = 8_000;
 const LIVE_POLL_EMERGENCY_MS = 5_000;
@@ -40,15 +68,6 @@ function toDateInputValue(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
-}
-
-function dayRangeIso(dateValue: string): { from: string; to: string } {
-  const start = new Date(`${dateValue}T00:00:00`);
-  const end = new Date(`${dateValue}T23:59:59.999`);
-  return {
-    from: start.toISOString(),
-    to: end.toISOString(),
-  };
 }
 
 function mergeLocations(
@@ -79,9 +98,12 @@ function formatSpeed(speedKnots?: number): string {
   return `${kmh.toFixed(1)} km/h`;
 }
 
-function formatBattery(batteryPercent?: number): string {
-  if (batteryPercent == null) return '—';
-  return `${batteryPercent}%`;
+function formatPowerStatus(point: Pick<DeviceLocation, 'battery_percent' | 'usb_connected' | 'battery_charging'>): string {
+  return formatMapPowerStatus(
+    point.battery_percent,
+    point.usb_connected,
+    point.battery_charging,
+  );
 }
 
 export function DeviceTrackingPage() {
@@ -93,8 +115,11 @@ export function DeviceTrackingPage() {
   const lastStoredUserIdRef = useRef<string | null>(null);
   const [device, setDevice] = useState<AccountDevice | null>(null);
   const [locations, setLocations] = useState<DeviceLocation[]>([]);
+  const [recentLocations, setRecentLocations] = useState<DeviceLocation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [settingsMessage, setSettingsMessage] = useState('');
+  const [settingsBusy, setSettingsBusy] = useState(false);
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null);
   const [pointExplorerOpen, setPointExplorerOpen] = useState(false);
   const [validPointIndex, setValidPointIndex] = useState<number | null>(null);
@@ -129,61 +154,199 @@ export function DeviceTrackingPage() {
     }
   }, [user?.id]);
 
-  const range = useMemo(() => dayRangeIso(selectedDate), [selectedDate]);
+  const range = useMemo(() => recordedDayRangeIso(selectedDate), [selectedDate]);
   const isSelectedToday = selectedDate === todayValue;
   const canUseLive = isSelectedToday && Boolean(device?.device_id);
+  const mapLive = viewMode === 'live' && isSelectedToday;
 
-  const qualityLocations = useMemo(
-    () => applyLocationQuality(locations),
+  const qualityDayLocations = useMemo(
+    () => collapseNearbyPoints(applyLocationQuality(locations)),
     [locations],
   );
 
+  const qualityRecentLocations = useMemo(
+    () => collapseNearbyPoints(applyLocationQuality(recentLocations)),
+    [recentLocations],
+  );
+
+  const qualityMapLocations = useMemo(
+    () =>
+      collapseNearbyPoints(
+        applyLocationQuality(mergeLocations(locations, recentLocations)),
+      ),
+    [locations, recentLocations],
+  );
+
+  const selectedDayLocations = useMemo(
+    () => filterLocationsForDay(qualityDayLocations, selectedDate),
+    [qualityDayLocations, selectedDate],
+  );
+
+  const lastKnownLocation = useMemo(
+    () => qualityRecentLocations.at(-1) ?? null,
+    [qualityRecentLocations],
+  );
+
+  const stationaryAnchor = useMemo(
+    () => findStationaryAnchor(qualityRecentLocations),
+    [qualityRecentLocations],
+  );
+
+  const showingLastKnownOutsideDay = useMemo(
+    () =>
+      viewMode === 'history' &&
+      selectedDayLocations.length === 0 &&
+      lastKnownLocation != null,
+    [viewMode, selectedDayLocations.length, lastKnownLocation],
+  );
+
+  const timelineLocations = selectedDayLocations;
+
+  const previousDayLastPoint = useMemo(() => {
+    const dayStartMs = new Date(recordedDayRangeIso(selectedDate).from).getTime();
+    const beforeDay = qualityRecentLocations.filter(
+      (point) => recordedAtMs(point.recorded_at) < dayStartMs,
+    );
+    return beforeDay.at(-1) ?? null;
+  }, [qualityRecentLocations, selectedDate]);
+
+  const dailyTimeline = useMemo(
+    () =>
+      buildDailyTimeline(timelineLocations, {
+        dateValue: selectedDate,
+        previousDayLastPoint,
+      }),
+    [timelineLocations, selectedDate, previousDayLastPoint],
+  );
+
+  const mapDisplayLocations = useMemo(() => {
+    if (mapLive) {
+      return buildLiveMapPoints(qualityMapLocations, range.from);
+    }
+    const historyPoints =
+      dailyTimeline.timelinePoints.length > 0
+        ? dailyTimeline.timelinePoints
+        : selectedDayLocations;
+    return buildHistoryMapPoints(historyPoints, lastKnownLocation);
+  }, [
+    mapLive,
+    qualityMapLocations,
+    range.from,
+    dailyTimeline.timelinePoints,
+    selectedDayLocations,
+    lastKnownLocation,
+  ]);
   const { valid: validLocations, invalid: invalidLocations } = useMemo(
-    () => splitLocations(qualityLocations),
-    [qualityLocations],
+    () => splitLocations(timelineLocations),
+    [timelineLocations],
   );
   const routeStats = useMemo(
     () => computeRouteStats(validLocations),
     [validLocations],
   );
-  const dailyTimeline = useMemo(
-    () => buildDailyTimeline(qualityLocations),
-    [qualityLocations],
+  const timelineValidLocations = useMemo(
+    () => selectedDayLocations.filter((point) => point.is_valid !== false),
+    [selectedDayLocations],
   );
+
+  const anchoredTodaySegment = useMemo(
+    () =>
+      isSelectedToday
+        ? resolveTodayAnchoredStationarySegment(
+            selectedDayLocations,
+            qualityRecentLocations,
+            {
+              dateValue: selectedDate,
+              todayValue,
+              nowMs: liveNowMs,
+              previousDayLastPoint,
+            },
+          )
+        : null,
+    [
+      isSelectedToday,
+      selectedDayLocations,
+      qualityRecentLocations,
+      selectedDate,
+      todayValue,
+      liveNowMs,
+      previousDayLastPoint,
+    ],
+  );
+
   const liveStopStatus = useMemo(
     () =>
       viewMode === 'live' && isSelectedToday
         ? resolveLiveStopStatus(
-            validLocations,
+            mapDisplayLocations.filter((point) => point.is_valid !== false),
             dailyTimeline.segments,
             liveNowMs,
           )
         : null,
-    [viewMode, isSelectedToday, validLocations, dailyTimeline.segments, liveNowMs],
+    [
+      viewMode,
+      isSelectedToday,
+      mapDisplayLocations,
+      dailyTimeline.segments,
+      liveNowMs,
+    ],
   );
-  const displayTimelineSegments = useMemo(
-    () =>
-      viewMode === 'live'
-        ? applyLiveStopExtension(dailyTimeline.segments, liveStopStatus, liveNowMs)
-        : dailyTimeline.segments,
-    [viewMode, dailyTimeline.segments, liveStopStatus, liveNowMs],
-  );
-  const latestBatteryReading = useMemo(() => {
-    for (let index = qualityLocations.length - 1; index >= 0; index -= 1) {
-      const point = qualityLocations[index];
-      if (
-        point.battery_percent != null &&
-        Number.isFinite(point.battery_percent)
-      ) {
-        return {
-          percent: point.battery_percent,
-          recordedAt: point.recorded_at,
-        };
-      }
+  const displayTimelineSegments = useMemo(() => {
+    if (anchoredTodaySegment) {
+      return [anchoredTodaySegment];
     }
-    return null;
-  }, [qualityLocations]);
-  const mapLive = viewMode === 'live' && isSelectedToday;
+
+    if (showingLastKnownOutsideDay && (stationaryAnchor ?? lastKnownLocation)) {
+      return [
+        buildAllDayStationarySegment(
+          stationaryAnchor ?? lastKnownLocation!,
+          selectedDate,
+          {
+            isToday: isSelectedToday,
+            nowMs: liveNowMs,
+          },
+        ),
+      ];
+    }
+
+    const withTrailing = resolveTrailingStopExtension(
+      dailyTimeline.segments,
+      timelineValidLocations,
+      {
+        selectedDate,
+        todayValue,
+        nowMs: liveNowMs,
+      },
+    );
+
+    if (viewMode === 'live' && isSelectedToday) {
+      return applyLiveStopExtension(withTrailing, liveStopStatus, liveNowMs);
+    }
+
+    return withTrailing;
+  }, [
+    anchoredTodaySegment,
+    showingLastKnownOutsideDay,
+    stationaryAnchor,
+    lastKnownLocation,
+    selectedDate,
+    isSelectedToday,
+    liveNowMs,
+    dailyTimeline.segments,
+    timelineValidLocations,
+    todayValue,
+    liveNowMs,
+    viewMode,
+    isSelectedToday,
+    liveStopStatus,
+  ]);
+  const powerStatus = useMemo(() => getDevicePowerStatus(device), [device]);
+
+  const powerStatusStale = useMemo(
+    () => isPowerStatusStale(powerStatus, liveNowMs),
+    [powerStatus, liveNowMs],
+  );
+
   const defaultSegmentId = useMemo(() => {
     const firstMove = displayTimelineSegments.find((segment) => segment.kind === 'move');
     return firstMove?.id ?? displayTimelineSegments[0]?.id ?? null;
@@ -259,25 +422,35 @@ export function DeviceTrackingPage() {
       setLoading(true);
       setError('');
       setLocations([]);
+      setRecentLocations([]);
       setDevice(null);
       lastReceivedRef.current = null;
 
       try {
-        const data = await getDeviceLocations(deviceId, {
-          from: range.from,
-          to: range.to,
-          full: true,
-        });
+        const [dayData, recentData] = await Promise.all([
+          getDeviceLocations(deviceId, {
+            from: range.from,
+            to: range.to,
+            full: true,
+          }),
+          getDeviceLocations(deviceId, { limit: 100 }),
+        ]);
         if (cancelled) return;
-        setDevice(data.device);
-        setLocations(data.locations);
-        const last = data.locations.at(-1);
-        lastReceivedRef.current = last?.received_at ?? null;
+
+        setDevice(dayData.device);
+        setLocations(dayData.locations);
+        setRecentLocations(recentData.locations);
+        const latestReceived =
+          recentData.locations[0]?.received_at ??
+          dayData.locations.at(-1)?.received_at ??
+          null;
+        lastReceivedRef.current = latestReceived;
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Erro ao carregar rastreios');
           setDevice(null);
           setLocations([]);
+          setRecentLocations([]);
           lastReceivedRef.current = null;
         }
       } finally {
@@ -297,7 +470,7 @@ export function DeviceTrackingPage() {
   }, [deviceId, range.from, range.to, selectedDate]);
 
   useEffect(() => {
-    if (!deviceId || viewMode !== 'live' || !canUseLive || loading) {
+    if (!deviceId || !isSelectedToday || loading) {
       return;
     }
 
@@ -315,16 +488,23 @@ export function DeviceTrackingPage() {
           limit: 100,
         });
 
-        if (cancelled || data.locations.length === 0) {
+        if (cancelled) {
           return;
         }
 
         setDevice(data.device);
+
+        if (data.locations.length === 0) {
+          return;
+        }
+
+        setRecentLocations((current) => mergeLocations(current, data.locations));
+
         setLocations((current) => {
           const merged = mergeLocations(current, data.locations);
           const last = merged.at(-1);
           lastReceivedRef.current = last?.received_at ?? lastReceivedRef.current;
-          return merged;
+          return filterLocationsForDay(merged, selectedDate);
         });
       } catch {
         // Falha silenciosa no polling para não atrapalhar a visualização.
@@ -338,10 +518,46 @@ export function DeviceTrackingPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [canUseLive, deviceId, viewMode, loading, range.from, range.to, device?.emergency_active]);
+  }, [
+    deviceId,
+    isSelectedToday,
+    loading,
+    range.from,
+    range.to,
+    selectedDate,
+    device?.emergency_active,
+  ]);
 
   useEffect(() => {
-    if (!canUseLive || viewMode !== 'live') {
+    if (!deviceId || loading) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function refreshDevicePower() {
+      try {
+        const updated = await getAccountDevice(deviceId);
+        if (!cancelled) {
+          setDevice(updated);
+        }
+      } catch {
+        // Falha silenciosa — badge de energia é auxiliar.
+      }
+    }
+
+    void refreshDevicePower();
+    const pollInterval = device?.emergency_active ? LIVE_POLL_EMERGENCY_MS : LIVE_POLL_MS;
+    const timer = window.setInterval(refreshDevicePower, pollInterval);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [deviceId, loading, device?.emergency_active]);
+
+  useEffect(() => {
+    if (!isSelectedToday) {
       return;
     }
 
@@ -352,123 +568,167 @@ export function DeviceTrackingPage() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [canUseLive, viewMode]);
+  }, [isSelectedToday]);
 
   const icon = device && isDeviceIcon(device.icon) ? device.icon : DEFAULT_DEVICE_ICON;
   const title = device?.label ?? 'Rastreador';
+  const hasAlertPhone = Boolean(user?.phone?.trim());
+
+  async function onSaveDeviceProfile(label: string, iconValue: DeviceIcon) {
+    if (!deviceId) return;
+    setSettingsBusy(true);
+    setSettingsMessage('');
+    setError('');
+    try {
+      const updated = await updateDevice(deviceId, { label, icon: iconValue });
+      setDevice(updated);
+      setSettingsMessage('Nome e ícone atualizados.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Falha ao salvar rastreador');
+      throw err;
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
+  async function onSaveDeviceAlerts(alerts: DeviceAlertSettings) {
+    if (!deviceId) return;
+    setSettingsBusy(true);
+    setSettingsMessage('');
+    setError('');
+    try {
+      const updated = await updateDeviceAlerts(deviceId, alerts);
+      setDevice(updated);
+      setSettingsMessage('Alertas atualizados.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Falha ao salvar alertas');
+      throw err;
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
 
   return (
     <div className="container page">
-      <div className="page-head tracking-page-head">
-        <div className="tracking-page-intro">
-          <Link className="tracking-back" to="/conta">
-            <span className="tracking-back-icon" aria-hidden="true">
-              ←
-            </span>
-            Voltar para minha conta
-          </Link>
+      <header className="tracking-page-header card" aria-label="Rastreamento do dispositivo">
+        <Link className="tracking-back" to="/conta">
+          <span className="tracking-back-icon" aria-hidden="true">
+            ←
+          </span>
+          Voltar para minha conta
+        </Link>
 
+        <div className="tracking-page-header-body">
           <div className="tracking-hero">
             <div className="tracking-hero-icon" aria-hidden="true">
               <DeviceIconGlyph icon={icon} size={30} />
             </div>
             <div className="tracking-hero-copy">
-              <div className="tracking-hero-title">
-                <h1>{title}</h1>
-                {!loading && latestBatteryReading ? (
+              <h1>{title}</h1>
+              {device?.device_id ? (
+                <p className="tracking-hero-imei">IMEI {device.device_id}</p>
+              ) : null}
+              <div className="tracking-hero-chips">
+                {!loading ? (
                   <DeviceBatteryBadge
-                    percent={latestBatteryReading.percent}
-                    recordedAt={latestBatteryReading.recordedAt}
+                    percent={powerStatus?.percent}
+                    recordedAt={powerStatus?.recordedAt}
+                    usbConnected={powerStatus?.usbConnected}
+                    batteryCharging={powerStatus?.batteryCharging}
+                    stale={powerStatusStale}
+                    compact
                   />
                 ) : null}
-              </div>
-              <div className="tracking-hero-meta">
-                {device?.device_id ? (
-                  <span className="tracking-identifier">
-                    Identificador {device.device_id}
-                  </span>
-                ) : null}
-                {mapLive ? (
+                {mapLive && canUseLive ? (
                   <span className="tracking-status tracking-status-live">
                     <span className="tracking-status-dot" aria-hidden="true" />
-                    Acompanhamento ao vivo
+                    Ao vivo
                   </span>
-                ) : (
-                  <span className="tracking-status">Histórico de posições</span>
-                )}
+                ) : null}
               </div>
             </div>
           </div>
-        </div>
 
-        <div className="tracking-live-controls">
-          <div
-            className="tracking-view-mode"
-            role="tablist"
-            aria-label="Modo de visualização"
-          >
-            <button
-              type="button"
-              role="tab"
-              id="tracking-mode-live"
-              aria-selected={viewMode === 'live'}
-              aria-controls="tracking-map-panel"
-              className={`tracking-view-mode-btn${
-                viewMode === 'live' ? ' tracking-view-mode-btn-active' : ''
-              }`}
-              onClick={switchToLive}
-            >
-              Ao vivo
-            </button>
-            <button
-              type="button"
-              role="tab"
-              id="tracking-mode-history"
-              aria-selected={viewMode === 'history'}
-              aria-controls="tracking-map-panel"
-              className={`tracking-view-mode-btn${
-                viewMode === 'history' ? ' tracking-view-mode-btn-active' : ''
-              }`}
-              onClick={switchToHistory}
-            >
-              Histórico
-            </button>
+          <div className="tracking-header-toolbar">
+            <div className="tracking-header-toolbar-primary">
+              <div
+                className="tracking-view-mode"
+                role="tablist"
+                aria-label="Modo de visualização"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  id="tracking-mode-live"
+                  aria-selected={viewMode === 'live'}
+                  aria-controls="tracking-map-panel"
+                  className={`tracking-view-mode-btn${
+                    viewMode === 'live' ? ' tracking-view-mode-btn-active' : ''
+                  }`}
+                  onClick={switchToLive}
+                >
+                  Ao vivo
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  id="tracking-mode-history"
+                  aria-selected={viewMode === 'history'}
+                  aria-controls="tracking-map-panel"
+                  className={`tracking-view-mode-btn${
+                    viewMode === 'history' ? ' tracking-view-mode-btn-active' : ''
+                  }`}
+                  onClick={switchToHistory}
+                >
+                  Histórico
+                </button>
+              </div>
+
+              {viewMode === 'history' ? (
+                <label className="tracking-date-filter tracking-date-filter-inline">
+                  <span className="tracking-date-filter-label">Dia</span>
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    max={todayValue}
+                    onChange={(event) => setSelectedDate(event.target.value)}
+                  />
+                </label>
+              ) : null}
+            </div>
+
+            {device?.device_id && !loading ? (
+              <div className="tracking-header-actions">
+                {viewMode === 'live' ? (
+                  <EmergencyModePanel
+                    deviceSlotId={deviceId}
+                    device={device}
+                    disabled={!device.is_active}
+                    onDeviceChange={setDevice}
+                  />
+                ) : null}
+                <ShareTrackingPanel
+                  deviceSlotId={deviceId}
+                  disabled={!device.is_active}
+                />
+              </div>
+            ) : null}
           </div>
-
-          {viewMode === 'live' && canUseLive ? (
-            <span className="tracking-live-badge" aria-live="polite">
-              LIVE
-            </span>
-          ) : null}
-
-          {viewMode === 'history' ? (
-            <label className="tracking-date-filter">
-              Dia
-              <input
-                type="date"
-                value={selectedDate}
-                max={todayValue}
-                onChange={(event) => setSelectedDate(event.target.value)}
-              />
-            </label>
-          ) : null}
-
-          {viewMode === 'live' && device?.device_id && !loading ? (
-            <EmergencyModePanel
-              deviceSlotId={deviceId}
-              device={device}
-              disabled={!device.is_active}
-              onDeviceChange={setDevice}
-            />
-          ) : null}
-
-          {device?.device_id && !loading ? (
-            <ShareTrackingPanel deviceSlotId={deviceId} disabled={!device.is_active} />
-          ) : null}
         </div>
-      </div>
+      </header>
 
       {error ? <p className="error-text">{error}</p> : null}
+      {settingsMessage ? <p className="success-text">{settingsMessage}</p> : null}
+
+      {!loading && device ? (
+        <DeviceSettingsPanel
+          device={device}
+          hasAlertPhone={hasAlertPhone}
+          busy={settingsBusy}
+          onSaveProfile={onSaveDeviceProfile}
+          onSaveAlerts={onSaveDeviceAlerts}
+        />
+      ) : null}
 
       {isSelectedToday && !loading ? (
         <LiveStopBanner status={liveStopStatus} active={canUseLive} />
@@ -509,7 +769,7 @@ export function DeviceTrackingPage() {
         </section>
       ) : null}
 
-      {!loading && viewMode === 'history' && validLocations.length < 2 ? (
+      {!loading && viewMode === 'history' && validLocations.length < 2 && !showingLastKnownOutsideDay ? (
         <p className="muted tracking-map-status">
           São necessários pelo menos 2 pontos para exibir a rota completa e calcular distância.
         </p>
@@ -517,7 +777,7 @@ export function DeviceTrackingPage() {
 
       <div id="tracking-map-panel">
         <TrackingMap
-        points={qualityLocations}
+        points={mapDisplayLocations}
         ready={!loading}
         resetKey={selectedDate}
         live={mapLive}
@@ -556,9 +816,18 @@ export function DeviceTrackingPage() {
                 validLocations={validLocations}
                 invalidLocations={invalidLocations}
                 formatSpeed={formatSpeed}
-                formatBattery={formatBattery}
+                formatBattery={formatPowerStatus}
                 selectedIndex={pointExplorerOpen ? validPointIndex : null}
                 onSelectPoint={handleValidPointSelect}
+                allDayStationaryFallback={
+                  showingLastKnownOutsideDay && lastKnownLocation
+                    ? {
+                        lastReadingAt: lastKnownLocation.recorded_at,
+                        point: lastKnownLocation,
+                        isToday: isSelectedToday,
+                      }
+                    : null
+                }
               />
             </div>
           </div>

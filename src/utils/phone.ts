@@ -61,3 +61,21 @@ export function brazilPhoneToE164(raw: string): string {
 
   return `+55${digits}`;
 }
+
+export function phoneStoredToBrazilInput(phone: string | null | undefined): string {
+  if (!phone) {
+    return '';
+  }
+  return formatBrazilPhoneInput(phone);
+}
+
+export function maskBrazilPhone(phone: string | null | undefined): string {
+  if (!phone) {
+    return 'Não cadastrado';
+  }
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length < 4) {
+    return '****';
+  }
+  return `****${digits.slice(-4)}`;
+}

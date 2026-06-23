@@ -22,16 +22,19 @@ import {
   liveZoomPoints,
 } from '../utils/liveMapPoints';
 import { formatDuration } from '../utils/routeStats';
+import { recordedAtMs } from '../utils/recordedTime';
 import { filterStationaryRoutingPoints, prepareDeviceRoutingPoints } from '../utils/routingWaypoints';
 import {
+  createReadingMarkerElement,
+  createStopMarkerElement,
+  applyReadingMarkerRole,
   markerRoleForIndex,
   markerZIndex,
-  readingMarkerIcon,
 } from '../utils/mapPointInfo';
 import { TrackingPointPanel } from './TrackingPointPanel';
 
 type MarkerEntry = {
-  marker: google.maps.Marker;
+  marker: google.maps.marker.AdvancedMarkerElement;
   validIndex: number;
 };
 
@@ -277,17 +280,6 @@ function fitMapToPoints(map: google.maps.Map, path: LatLng[]): void {
   map.fitBounds(bounds, 48);
 }
 
-function createStopIcon(color: string, options?: { prominent?: boolean }): google.maps.Symbol {
-  return {
-    path: google.maps.SymbolPath.CIRCLE,
-    fillColor: color,
-    fillOpacity: 1,
-    strokeColor: '#ffffff',
-    strokeWeight: options?.prominent ? 3 : 2,
-    scale: options?.prominent ? 12 : 8,
-  };
-}
-
 function formatStopMarkerLabel(durationSec: number): string {
   const totalMinutes = Math.round(durationSec / 60);
   if (totalMinutes < 60) {
@@ -322,7 +314,7 @@ export function TrackingMap({
   const routeLineRef = useRef<google.maps.Polyline | null>(null);
   const liveBackgroundLineRef = useRef<google.maps.Polyline | null>(null);
   const backgroundLinesRef = useRef<google.maps.Polyline[]>([]);
-  const stopMarkersRef = useRef<google.maps.Marker[]>([]);
+  const stopMarkersRef = useRef<google.maps.marker.AdvancedMarkerElement[]>([]);
   const drawTokenRef = useRef(0);
 
   const [loading, setLoading] = useState(false);
@@ -353,19 +345,14 @@ export function TrackingMap({
       const durationSec = stopDurationSec(segment);
       const prominent =
         segment.id === highlightedSegmentId || durationSec >= 30 * 60;
-      const marker = new google.maps.Marker({
+      const marker = new google.maps.marker.AdvancedMarkerElement({
         map,
         position: { lat: segment.centroidLat, lng: segment.centroidLng },
-        icon: createStopIcon(segment.color, { prominent }),
+        content: createStopMarkerElement(segment.color, {
+          prominent,
+          label: prominent ? formatStopMarkerLabel(durationSec) : undefined,
+        }),
         title: `Parada · ${formatDuration(durationSec)}`,
-        label: prominent
-          ? {
-              text: formatStopMarkerLabel(durationSec),
-              color: '#0f172a',
-              fontSize: '11px',
-              fontWeight: '700',
-            }
-          : undefined,
         zIndex: prominent ? 600 : 500,
       });
       stopMarkersRef.current.push(marker);
@@ -376,9 +363,14 @@ export function TrackingMap({
     const validEntries = markersRef.current.filter((entry) => entry.validIndex >= 0);
     const total = validEntries.length;
     for (const entry of markersRef.current) {
+      const content = entry.marker.content;
+      if (!(content instanceof HTMLDivElement)) {
+        continue;
+      }
+
       if (entry.validIndex < 0) {
-        entry.marker.setIcon(readingMarkerIcon(google.maps.SymbolPath, 'outlier'));
-        entry.marker.setZIndex(markerZIndex('outlier'));
+        applyReadingMarkerRole(content, 'outlier');
+        entry.marker.zIndex = markerZIndex('outlier');
         continue;
       }
 
@@ -386,8 +378,8 @@ export function TrackingMap({
         activeIndex == null
           ? 'default'
           : markerRoleForIndex(entry.validIndex, activeIndex, total);
-      entry.marker.setIcon(readingMarkerIcon(google.maps.SymbolPath, role));
-      entry.marker.setZIndex(markerZIndex(role));
+      applyReadingMarkerRole(content, role);
+      entry.marker.zIndex = markerZIndex(role);
     }
   }
 
@@ -398,7 +390,7 @@ export function TrackingMap({
     backgroundLinesRef.current.forEach((line) => line.setMap(null));
     backgroundLinesRef.current = [];
     stopMarkersRef.current.forEach((marker) => {
-      marker.setMap(null);
+      marker.map = null;
     });
     stopMarkersRef.current = [];
   }
@@ -410,7 +402,7 @@ export function TrackingMap({
 
   function syncMarkers(map: google.maps.Map, isLive: boolean): void {
     markersRef.current.forEach((entry) => {
-      entry.marker.setMap(null);
+      entry.marker.map = null;
     });
     markersRef.current = [];
 
@@ -425,15 +417,15 @@ export function TrackingMap({
       }
 
       const markerRole = isValidReading(point) ? 'default' : 'outlier';
-      const marker = new google.maps.Marker({
+      const marker = new google.maps.marker.AdvancedMarkerElement({
         map,
         position: toLatLng(point),
-        icon: readingMarkerIcon(google.maps.SymbolPath, markerRole),
+        content: createReadingMarkerElement(markerRole),
         zIndex: markerZIndex(markerRole),
       });
       if (isValidReading(point)) {
         const capturedIndex = validIndex;
-        marker.addListener('click', () => {
+        marker.addListener('gmp-click', () => {
           if (!live) {
             onValidPointSelectRef.current?.(capturedIndex);
           }
@@ -598,6 +590,11 @@ export function TrackingMap({
     for (let index = 0; index < moveSegments.length - 1; index += 1) {
       const moveA = moveSegments[index];
       const moveB = moveSegments[index + 1];
+      const gapMs =
+        recordedAtMs(moveB.startAt) - recordedAtMs(moveA.endAt);
+      if (gapMs > 20 * 60 * 1000) {
+        continue;
+      }
       const lineA = segmentLines.get(moveA.id);
       const lineB = segmentLines.get(moveB.id);
       if (!lineA || !lineB) {
@@ -1101,22 +1098,22 @@ export function TrackingMap({
 
     const selected = currentSegments.find((segment) => segment.id === segmentId);
 
-    for (const segment of currentSegments) {
+    for (let segmentIndex = 0; segmentIndex < currentSegments.length; segmentIndex += 1) {
+      const segment = currentSegments[segmentIndex];
       if (segment.kind === 'stop') {
-        const marker = new google.maps.Marker({
+        const durationSec = stopDurationSec(segment);
+        const prominent = durationSec >= 30 * 60;
+        const marker = new google.maps.marker.AdvancedMarkerElement({
           map,
           position: { lat: segment.centroidLat, lng: segment.centroidLng },
-          icon: createStopIcon(segment.color, {
-            prominent: stopDurationSec(segment) >= 30 * 60,
+          content: createStopMarkerElement(segment.color, {
+            prominent,
+            label: prominent ? formatStopMarkerLabel(durationSec) : undefined,
           }),
+          title: `Parada · ${formatDuration(durationSec)}`,
           zIndex: 5,
         });
         stopMarkersRef.current.push(marker);
-        continue;
-      }
-
-      const path = pointsToPath(segmentPathPoints(currentPoints, segment));
-      if (path.length < 2) {
         continue;
       }
 
@@ -1125,9 +1122,20 @@ export function TrackingMap({
         continue;
       }
 
+      const displayPoints = moveSegmentDisplayPoints(
+        currentPoints,
+        segment,
+        segmentIndex,
+        currentSegments,
+      );
+      const { gpsFallback } = buildSegmentRouteInput(displayPoints);
+      if (gpsFallback.length < 2) {
+        continue;
+      }
+
       const line = new google.maps.Polyline({
         map,
-        path,
+        path: gpsFallback,
         geodesic: true,
         strokeColor: segment.color,
         strokeOpacity: 0.3,
@@ -1135,6 +1143,13 @@ export function TrackingMap({
         zIndex: 1,
       });
       backgroundLinesRef.current.push(line);
+
+      if (provider) {
+        await applySegmentRoadLine(provider, line, displayPoints, token);
+        if (token !== drawTokenRef.current) {
+          return;
+        }
+      }
     }
 
     if (!selected) {
@@ -1191,8 +1206,11 @@ export function TrackingMap({
       setMainRoute(map, resolved.path, selected.color);
       fitMapToPoints(map, resolved.path);
     }
-    if (resolved.warning) {
-      setRouteNote(resolved.warning);
+    if (resolved.warning || resolved.path.length < 2) {
+      setRouteNote(
+        resolved.warning ??
+          'Não foi possível traçar a rota pelas ruas — verifique Routes/Directions API no Google Cloud.',
+      );
     }
   }
 
@@ -1210,13 +1228,13 @@ export function TrackingMap({
     setError('');
 
     void loadGoogleMaps(MAPS_KEY)
-      .then(async ({ Map, Polyline, Route }) => {
+      .then(async ({ Map, Polyline, Route, DirectionsService }) => {
         if (cancelled || !containerRef.current) {
           return;
         }
 
         markersRef.current.forEach((entry) => {
-          entry.marker.setMap(null);
+          entry.marker.map = null;
         });
         markersRef.current = [];
         routeLineRef.current?.setMap(null);
@@ -1238,7 +1256,11 @@ export function TrackingMap({
         });
 
         mapRef.current = map;
-        providerRef.current = createRouteProvider(Route, MAPS_KEY);
+        providerRef.current = createRouteProvider(
+          Route,
+          MAPS_KEY,
+          new DirectionsService(),
+        );
         syncMarkers(map, live);
 
         routeLineRef.current = new Polyline({
@@ -1292,13 +1314,13 @@ export function TrackingMap({
       cancelled = true;
       drawTokenRef.current += 1;
       markersRef.current.forEach((entry) => {
-        entry.marker.setMap(null);
+        entry.marker.map = null;
       });
       markersRef.current = [];
       backgroundLinesRef.current.forEach((line) => line.setMap(null));
       backgroundLinesRef.current = [];
       stopMarkersRef.current.forEach((marker) => {
-        marker.setMap(null);
+        marker.map = null;
       });
       stopMarkersRef.current = [];
       liveBackgroundLineRef.current?.setMap(null);
@@ -1358,7 +1380,11 @@ export function TrackingMap({
   if (points.length === 0) {
     return (
       <div className="tracking-map-empty card">
-        <p>Nenhum ponto de rastreio para o período selecionado.</p>
+        <p>
+          {live
+            ? 'Ainda não há nenhuma posição registrada para este equipamento.'
+            : 'Nenhum ponto de rastreio para o período selecionado.'}
+        </p>
       </div>
     );
   }

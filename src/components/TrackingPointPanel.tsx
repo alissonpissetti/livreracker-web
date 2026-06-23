@@ -1,6 +1,6 @@
 import type { DeviceLocation } from '../types';
 import {
-  formatMapBattery,
+  formatMapPowerStatus,
   formatMapSpeed,
   formatMapTime,
 } from '../utils/mapPointInfo';
@@ -141,7 +141,13 @@ export function TrackingPointPanel({
         </div>
         <div>
           <dt>Bateria</dt>
-          <dd>{formatMapBattery(current.battery_percent)}</dd>
+          <dd>
+            {formatMapPowerStatus(
+              current.battery_percent,
+              current.usb_connected,
+              current.battery_charging,
+            )}
+          </dd>
         </div>
       </dl>
 

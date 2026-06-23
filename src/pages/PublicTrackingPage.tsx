@@ -8,7 +8,9 @@ import { LiveStopBanner } from '../components/LiveStopBanner';
 import { DEFAULT_DEVICE_ICON, isDeviceIcon } from '../constants/deviceIcons';
 import type { DeviceLocation } from '../types';
 import { applyLocationQuality } from '../utils/locationOutliers';
+import { collapseNearbyPoints } from '../utils/liveMapPoints';
 import { buildDailyTimeline } from '../utils/dailyTimeline';
+import { getDevicePowerStatus, isPowerStatusStale } from '../utils/devicePowerStatus';
 import { resolveLiveStopStatus } from '../utils/liveStopStatus';
 import { formatRecordedDateTime, recordedAtMs } from '../utils/recordedTime';
 
@@ -41,13 +43,19 @@ export function PublicTrackingPage() {
   const [deviceLabel, setDeviceLabel] = useState('Rastreador');
   const [deviceIcon, setDeviceIcon] = useState(DEFAULT_DEVICE_ICON);
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
+  const [devicePower, setDevicePower] = useState<{
+    last_battery_percent?: number | null;
+    last_usb_connected?: boolean | null;
+    last_battery_charging?: boolean | null;
+    last_power_at?: string | null;
+  } | null>(null);
   const [locations, setLocations] = useState<DeviceLocation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const lastReceivedRef = useRef<string | null>(null);
 
   const qualityLocations = useMemo(
-    () => applyLocationQuality(locations),
+    () => collapseNearbyPoints(applyLocationQuality(locations)),
     [locations],
   );
 
@@ -70,18 +78,11 @@ export function PublicTrackingPage() {
     [qualityLocations, dailyTimeline.segments, liveNowMs],
   );
 
-  const latestBatteryReading = useMemo(() => {
-    for (let index = qualityLocations.length - 1; index >= 0; index -= 1) {
-      const point = qualityLocations[index];
-      if (point.battery_percent != null && Number.isFinite(point.battery_percent)) {
-        return {
-          percent: point.battery_percent,
-          recordedAt: point.recorded_at,
-        };
-      }
-    }
-    return null;
-  }, [qualityLocations]);
+  const powerStatus = useMemo(() => getDevicePowerStatus(devicePower), [devicePower]);
+  const powerStatusStale = useMemo(
+    () => isPowerStatusStale(powerStatus, liveNowMs),
+    [powerStatus, liveNowMs],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -101,6 +102,12 @@ export function PublicTrackingPage() {
         setDeviceLabel(data.device_label);
         setDeviceIcon(isDeviceIcon(data.device_icon) ? data.device_icon : DEFAULT_DEVICE_ICON);
         setExpiresAt(data.expires_at);
+        setDevicePower({
+          last_battery_percent: data.last_battery_percent,
+          last_usb_connected: data.last_usb_connected,
+          last_battery_charging: data.last_battery_charging,
+          last_power_at: data.last_power_at,
+        });
         setLocations(data.locations);
         lastReceivedRef.current = data.locations.at(-1)?.received_at ?? null;
       } catch (err) {
@@ -136,9 +143,21 @@ export function PublicTrackingPage() {
           ? new Date(new Date(lastReceivedRef.current).getTime() + 1).toISOString()
           : undefined;
         const data = await getPublicTracking(token, { since, limit: 100 });
-        if (cancelled || data.locations.length === 0) {
+        if (cancelled) {
           return;
         }
+
+        setDevicePower({
+          last_battery_percent: data.last_battery_percent,
+          last_usb_connected: data.last_usb_connected,
+          last_battery_charging: data.last_battery_charging,
+          last_power_at: data.last_power_at,
+        });
+
+        if (data.locations.length === 0) {
+          return;
+        }
+
         setLocations((current) => {
           const merged = mergeLocations(current, data.locations);
           const last = merged.at(-1);
@@ -169,10 +188,13 @@ export function PublicTrackingPage() {
             <div className="tracking-title-copy">
               <div className="tracking-title-line">
                 <h1>{deviceLabel}</h1>
-                {!loading && latestBatteryReading ? (
+                {!loading ? (
                   <DeviceBatteryBadge
-                    percent={latestBatteryReading.percent}
-                    recordedAt={latestBatteryReading.recordedAt}
+                    percent={powerStatus?.percent}
+                    recordedAt={powerStatus?.recordedAt}
+                    usbConnected={powerStatus?.usbConnected}
+                    batteryCharging={powerStatus?.batteryCharging}
+                    stale={powerStatusStale}
                   />
                 ) : null}
               </div>

@@ -8,6 +8,20 @@ export function formatMapBattery(batteryPercent?: number): string {
   return `${batteryPercent}%`;
 }
 
+export function formatMapPowerStatus(
+  batteryPercent?: number,
+  usbConnected?: boolean,
+  batteryCharging?: boolean,
+): string {
+  if (batteryCharging) {
+    return batteryPercent != null ? `Carregando (${batteryPercent}%)` : 'Carregando';
+  }
+  if (usbConnected) {
+    return batteryPercent != null ? `USB (${batteryPercent}%)` : 'USB conectado';
+  }
+  return formatMapBattery(batteryPercent);
+}
+
 import { formatRecordedTime } from './recordedTime';
 
 export function formatMapTime(iso: string): string {
@@ -63,6 +77,40 @@ export function applyReadingMarkerRole(
     element.style.outline = '';
     element.style.outlineOffset = '';
   }
+}
+
+export function createStopMarkerElement(
+  color: string,
+  options?: { prominent?: boolean; label?: string },
+): HTMLDivElement {
+  const wrap = document.createElement('div');
+  wrap.style.display = 'flex';
+  wrap.style.flexDirection = 'column';
+  wrap.style.alignItems = 'center';
+  wrap.style.pointerEvents = 'auto';
+
+  const dot = document.createElement('div');
+  const size = options?.prominent ? 24 : 16;
+  dot.style.width = `${size}px`;
+  dot.style.height = `${size}px`;
+  dot.style.borderRadius = '999px';
+  dot.style.background = color;
+  dot.style.border = `${options?.prominent ? 3 : 2}px solid #ffffff`;
+  dot.style.boxSizing = 'border-box';
+  wrap.appendChild(dot);
+
+  if (options?.label) {
+    const label = document.createElement('div');
+    label.textContent = options.label;
+    label.style.marginTop = '2px';
+    label.style.fontSize = '11px';
+    label.style.fontWeight = '700';
+    label.style.color = '#0f172a';
+    label.style.textShadow = '0 0 2px #ffffff';
+    wrap.appendChild(label);
+  }
+
+  return wrap;
 }
 
 export function readingMarkerIcon(

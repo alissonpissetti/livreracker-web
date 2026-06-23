@@ -20,6 +20,13 @@ export function formatRecordedDateTime(iso: string): string {
   });
 }
 
+/** Timestamps UTC reais (API/servidor) → horário de Brasília, sem offset do ESP32. */
+export function formatInstantDateTime(iso: string): string {
+  return new Date(iso).toLocaleString('pt-BR', {
+    timeZone: DISPLAY_TIME_ZONE,
+  });
+}
+
 export function formatRecordedTime(iso: string): string {
   return parseRecordedAt(iso).toLocaleTimeString('pt-BR', {
     hour: '2-digit',

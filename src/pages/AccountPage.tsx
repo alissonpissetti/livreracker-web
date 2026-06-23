@@ -1,18 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import {
-  activateDevice,
-  getDevices,
-  getOrders,
-  updateDevice,
-} from '../api/client';
+import { activateDevice, getDevices, getOrders } from '../api/client';
 import { AccountDeviceCard } from '../components/AccountDeviceCard';
+import { AccountProfileSection } from '../components/AccountProfileSection';
 import { useAuth } from '../context/AuthContext';
-import type { DeviceIcon } from '../constants/deviceIcons';
 import type { AccountDevice, AccountOrder } from '../types';
 
 export function AccountPage() {
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
   const [orders, setOrders] = useState<AccountOrder[]>([]);
   const [devices, setDevices] = useState<AccountDevice[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,6 +38,22 @@ export function AccountPage() {
     load();
   }, []);
 
+  const activeDeviceCount = devices.filter((device) => !device.awaiting_activation).length;
+
+  useEffect(() => {
+    if (activeDeviceCount === 0) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void getDevices()
+        .then((data) => setDevices(data.devices))
+        .catch(() => {});
+    }, 20000);
+
+    return () => window.clearInterval(intervalId);
+  }, [activeDeviceCount]);
+
   async function onActivate(slotId: string) {
     const deviceId = imeiBySlot[slotId]?.trim();
     if (!deviceId) {
@@ -65,35 +76,19 @@ export function AccountPage() {
     }
   }
 
-  async function onSaveProfile(
-    slotId: string,
-    label: string,
-    icon: DeviceIcon,
-  ) {
-    setActionId(slotId);
-    setError('');
-    setSuccess('');
-    try {
-      await updateDevice(slotId, { label, icon });
-      setSuccess('Rastreador atualizado.');
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Falha ao salvar rastreador');
-      throw err;
-    } finally {
-      setActionId('');
-    }
-  }
-
   const pending = devices.filter((d) => d.awaiting_activation);
   const active = devices.filter((d) => !d.awaiting_activation);
+
+  if (!user) {
+    return null;
+  }
 
   return (
     <div className="container page">
       <div className="page-head">
         <h1>Minha conta</h1>
         <p className="muted">
-          Olá, {user?.name}. Veja seus rastreadores, personalize nomes e ícones.
+          Gerencie seus dados, rastreadores e pedidos.
         </p>
       </div>
 
@@ -101,69 +96,69 @@ export function AccountPage() {
       {error ? <p className="error-text">{error}</p> : null}
       {loading ? <p>Carregando...</p> : null}
 
-      <section className="account-section">
-        <div className="section-head">
-          <h2>Meus rastreadores</h2>
-          <Link className="btn btn-secondary" to="/loja">
-            Comprar mais
-          </Link>
-        </div>
+      <div className="account-overview">
+        <AccountProfileSection user={user} onUpdated={() => refresh()} />
 
-        {!loading && devices.length === 0 ? (
-          <div className="card empty-state">
-            <p>Você ainda não comprou nenhum rastreador.</p>
-            <Link className="btn btn-primary" to="/loja">
-              Ver equipamentos
+        <section className="account-section account-section-devices">
+          <div className="section-head">
+            <h2>Meus rastreadores</h2>
+            <Link className="btn btn-secondary btn-sm" to="/loja">
+              Comprar mais
             </Link>
           </div>
-        ) : null}
 
-        {devices.length > 0 ? (
-          <div className="device-grid">
-            {pending.length > 0 ? (
-              <div className="stack">
-                <h3 className="section-subtitle">Aguardando ativação</h3>
-                {pending.map((device) => (
-                  <AccountDeviceCard
-                    key={device.id}
-                    device={device}
-                    busy={actionId === device.id}
-                    imeiValue={imeiBySlot[device.id] ?? ''}
-                    onImeiChange={(value) =>
-                      setImeiBySlot((current) => ({
-                        ...current,
-                        [device.id]: value,
-                      }))
-                    }
-                    onActivate={() => onActivate(device.id)}
-                    onSaveProfile={(label, icon) =>
-                      onSaveProfile(device.id, label, icon)
-                    }
-                  />
-                ))}
-              </div>
-            ) : null}
+          {!loading && devices.length === 0 ? (
+            <div className="card empty-state">
+              <p>Você ainda não comprou nenhum rastreador.</p>
+              <Link className="btn btn-primary" to="/loja">
+                Ver equipamentos
+              </Link>
+            </div>
+          ) : null}
 
-            {active.length > 0 ? (
-              <div className="stack">
-                <h3 className="section-subtitle">Ativos na conta</h3>
-                {active.map((device) => (
-                  <AccountDeviceCard
-                    key={device.id}
-                    device={device}
-                    busy={actionId === device.id}
-                    imeiValue=""
-                    onImeiChange={() => {}}
-                    onSaveProfile={(label, icon) =>
-                      onSaveProfile(device.id, label, icon)
-                    }
-                  />
-                ))}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </section>
+          {devices.length > 0 ? (
+            <div className="device-list-compact">
+              {pending.length > 0 ? (
+                <div className="stack">
+                  <h3 className="section-subtitle">Aguardando ativação</h3>
+                  {pending.map((device) => (
+                    <AccountDeviceCard
+                      key={device.id}
+                      device={device}
+                      busy={actionId === device.id}
+                      imeiValue={imeiBySlot[device.id] ?? ''}
+                      onImeiChange={(value) =>
+                        setImeiBySlot((current) => ({
+                          ...current,
+                          [device.id]: value,
+                        }))
+                      }
+                      onActivate={() => onActivate(device.id)}
+                    />
+                  ))}
+                </div>
+              ) : null}
+
+              {active.length > 0 ? (
+                <div className="stack">
+                  {pending.length > 0 ? (
+                    <h3 className="section-subtitle">Ativos na conta</h3>
+                  ) : null}
+                  {active.map((device) => (
+                    <AccountDeviceCard
+                      key={device.id}
+                      device={device}
+                      busy={actionId === device.id}
+                      imeiValue=""
+                      onImeiChange={() => {}}
+                    />
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      </div>
 
       <section className="account-section">
         <h2>Meus pedidos</h2>

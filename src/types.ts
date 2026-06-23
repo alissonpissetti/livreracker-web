@@ -92,6 +92,14 @@ export type AccountDevice = {
   emergency_until?: string | null;
   emergency_active?: boolean;
   emergency_remaining_sec?: number;
+  alert_battery_low_enabled?: boolean;
+  alert_battery_full_enabled?: boolean;
+  last_battery_percent?: number | null;
+  last_usb_connected?: boolean | null;
+  last_battery_charging?: boolean | null;
+  last_power_at?: string | null;
+  sms_command_pin?: string | null;
+  sim_msisdn?: string | null;
 };
 
 export type DeviceLocation = {
@@ -101,6 +109,8 @@ export type DeviceLocation = {
   speed_knots?: number;
   accuracy_m?: number;
   battery_percent?: number;
+  usb_connected?: boolean;
+  battery_charging?: boolean;
   location_source?: string;
   is_valid?: boolean;
   /** Posição ajustada quando a leitura desvia lateralmente do trecho. */
@@ -131,6 +141,10 @@ export type PublicTrackingResponse = {
   device_label: string;
   device_icon: string;
   expires_at: string | null;
+  last_battery_percent?: number | null;
+  last_usb_connected?: boolean | null;
+  last_battery_charging?: boolean | null;
+  last_power_at?: string | null;
   locations: DeviceLocation[];
 };
 

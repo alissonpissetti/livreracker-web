@@ -169,6 +169,16 @@ export function getMe() {
   return api<User>('/v1/auth/me');
 }
 
+export function updateAccountProfile(body: {
+  name?: string;
+  phone?: string | null;
+}) {
+  return api<User>('/v1/account/profile', {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
 export function getProducts() {
   return api<Product[]>('/v1/store/products', { auth: false }).then((items) =>
     items.map(presentProduct),
@@ -294,6 +304,10 @@ export function getDevices() {
   return api<{ devices: AccountDevice[] }>('/v1/account/devices');
 }
 
+export function getAccountDevice(deviceSlotId: string) {
+  return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}`);
+}
+
 export function activateDevice(deviceSlotId: string, deviceId: string) {
   return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}/activate`, {
     method: 'PATCH',
@@ -306,6 +320,19 @@ export function updateDevice(
   body: { label?: string; icon?: string },
 ) {
   return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateDeviceAlerts(
+  deviceSlotId: string,
+  body: {
+    alert_battery_low_enabled?: boolean;
+    alert_battery_full_enabled?: boolean;
+  },
+) {
+  return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}/alerts`, {
     method: 'PATCH',
     body: JSON.stringify(body),
   });
@@ -337,6 +364,13 @@ export function activateDeviceEmergency(deviceSlotId: string) {
 export function deactivateDeviceEmergency(deviceSlotId: string) {
   return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}/emergency`, {
     method: 'DELETE',
+  });
+}
+
+export function updateDeviceChipNumber(deviceSlotId: string, sim_msisdn: string) {
+  return api<AccountDevice>(`/v1/account/devices/${deviceSlotId}/chip`, {
+    method: 'PATCH',
+    body: JSON.stringify({ sim_msisdn }),
   });
 }
 

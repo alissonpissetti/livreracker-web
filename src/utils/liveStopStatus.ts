@@ -1,5 +1,6 @@
 import type { DeviceLocation } from '../types';
 import type { TimelineSegment } from './dailyTimeline';
+import { extendLastStopSegment } from './dailyTimeline';
 import { haversineMeters } from './geo';
 import { isValidReading } from './locationOutliers';
 import { recordedAtMs } from './recordedTime';
@@ -202,15 +203,7 @@ export function applyLiveStopExtension(
     Math.max((nowMs - recordedAtMs(startAt)) / 1000, 0);
 
   if (segments.length > 0 && segments[segments.length - 1].kind === 'stop') {
-    const last = segments[segments.length - 1];
-    return [
-      ...segments.slice(0, -1),
-      {
-        ...last,
-        endAt,
-        durationSec: durationSec(last.startAt),
-      },
-    ];
+    return extendLastStopSegment(segments, endAt, 'now');
   }
 
   const colorIndex = segments.length;
@@ -230,6 +223,7 @@ export function applyLiveStopExtension(
       centroidLng: status.centroidLng,
       distanceM: 0,
       durationSec: durationSec(status.sinceAt),
+      trailingUntil: 'now',
     },
   ];
 }

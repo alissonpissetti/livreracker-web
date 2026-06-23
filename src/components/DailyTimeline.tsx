@@ -4,7 +4,7 @@ import {
   formatTimelineSegmentSummary,
   formatTimelineSegmentTitle,
   formatTimelineTimeRange,
-  stopDurationSec,
+  formatStopDurationLabel,
 } from '../utils/dailyTimeline';
 import { formatDuration } from '../utils/routeStats';
 import { getCachedPlaceLabel, resolvePlaceLabel } from '../utils/placeLabel';
@@ -55,9 +55,9 @@ function SegmentCard({
   onSelect: () => void;
 }) {
   const isStop = segment.kind === 'stop';
-  const durationLabel = formatDuration(
-    isStop ? stopDurationSec(segment) : segment.durationSec,
-  );
+  const durationLabel = isStop
+    ? formatStopDurationLabel(segment)
+    : formatDuration(segment.durationSec);
 
   return (
     <button
@@ -91,9 +91,7 @@ function SegmentCard({
 
         {isStop ? (
           <>
-            <p className="tracking-timeline-stop-duration">
-              Parado por {durationLabel}
-            </p>
+            <p className="tracking-timeline-stop-duration">{durationLabel}</p>
             <p className="tracking-timeline-summary tracking-timeline-stop-location">
               {formatTimelineSegmentSummary(segment, placeLabel)}
             </p>

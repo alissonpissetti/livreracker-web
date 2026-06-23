@@ -30,9 +30,10 @@ const CHAIN_MIN_SEGMENT_M = 10;
 /** Distância (m) para considerar vértices duplicados ao encadear trechos. */
 const CHAIN_MERGE_TOLERANCE_M = 8;
 /** Proporção máxima comprimento da rota / linha reta antes de descartar o trecho. */
-const MAX_ROUTE_DETOUR_RATIO_SHORT = 1.85;
-const MAX_ROUTE_DETOUR_RATIO_LONG = 2.6;
+const MAX_ROUTE_DETOUR_RATIO_SHORT = 8;
+const MAX_ROUTE_DETOUR_RATIO_LONG = 12;
 const SHORT_SEGMENT_DIRECT_M = 180;
+const ABSURD_ROUTE_DETOUR_RATIO = 20;
 
 export function isValidLatLng(
   point: LatLng | null | undefined,
@@ -81,16 +82,130 @@ function pathLengthMeters(path: LatLng[]): number {
 
 function isReasonableRoute(from: LatLng, to: LatLng, path: LatLng[]): boolean {
   const direct = haversineMeters(from.lat, from.lng, to.lat, to.lng);
-  if (direct < 25) {
+  if (direct < 15) {
     return path.length >= 2;
   }
 
   const routeLength = pathLengthMeters(path);
+  if (routeLength < direct * 0.85) {
+    return false;
+  }
+
   const maxRatio =
     direct < SHORT_SEGMENT_DIRECT_M
       ? MAX_ROUTE_DETOUR_RATIO_SHORT
       : MAX_ROUTE_DETOUR_RATIO_LONG;
-  return routeLength / direct <= maxRatio;
+  const ratio = routeLength / direct;
+  return ratio <= maxRatio && ratio <= ABSURD_ROUTE_DETOUR_RATIO;
+}
+
+function latLngFromGooglePoint(point: google.maps.LatLng | google.maps.LatLngAltitude): LatLng {
+  const lat = typeof point.lat === 'function' ? point.lat() : point.lat;
+  const lng = typeof point.lng === 'function' ? point.lng() : point.lng;
+  return { lat, lng };
+}
+
+function readGooglePath(stepPath: google.maps.LatLng[] | google.maps.MVCArray<google.maps.LatLng>): LatLng[] {
+  if (Array.isArray(stepPath)) {
+    return stepPath.map(latLngFromGooglePoint);
+  }
+
+  const points: LatLng[] = [];
+  for (let index = 0; index < stepPath.getLength(); index += 1) {
+    const point = stepPath.getAt(index);
+    if (point) {
+      points.push(latLngFromGooglePoint(point));
+    }
+  }
+  return points;
+}
+
+function pathFromRoute(route: google.maps.routes.Route): LatLng[] {
+  const routePath = route.path;
+  if (routePath && routePath.length >= 2) {
+    return routePath.map(latLngFromGooglePoint);
+  }
+
+  const path: LatLng[] = [];
+
+  for (const polyline of route.createPolylines()) {
+    const latLngs = polyline.getPath();
+    if (!latLngs) continue;
+
+    for (let i = 0; i < latLngs.getLength(); i++) {
+      const latLng = latLngs.getAt(i);
+      if (!latLng) continue;
+      path.push(latLngFromGooglePoint(latLng));
+    }
+  }
+
+  return path;
+}
+
+function pathFromDirectionsRoute(route: google.maps.DirectionsRoute): LatLng[] {
+  const path: LatLng[] = [];
+
+  for (const leg of route.legs) {
+    for (const step of leg.steps) {
+      const stepPath = step.path;
+      if (!stepPath) continue;
+      path.push(...readGooglePath(stepPath));
+    }
+  }
+
+  if (path.length >= 2) {
+    return path;
+  }
+
+  if (route.overview_path && route.overview_path.length >= 2) {
+    return route.overview_path.map(latLngFromGooglePoint);
+  }
+
+  return path;
+}
+
+async function computeRouteThroughDirections(
+  directionsService: google.maps.DirectionsService,
+  waypoints: LatLng[],
+): Promise<LatLng[]> {
+  if (waypoints.length < 2) {
+    return waypoints;
+  }
+
+  const request: google.maps.DirectionsRequest = {
+    origin: waypoints[0],
+    destination: waypoints[waypoints.length - 1],
+    travelMode: google.maps.TravelMode.DRIVING,
+  };
+
+  if (waypoints.length > 2) {
+    request.waypoints = waypoints.slice(1, -1).map((point) => ({
+      location: point,
+      stopover: true,
+    }));
+  }
+
+  const result = await new Promise<google.maps.DirectionsResult>((resolve, reject) => {
+    directionsService.route(request, (response, status) => {
+      if (status === google.maps.DirectionsStatus.OK && response) {
+        resolve(response);
+        return;
+      }
+      reject(new Error(status));
+    });
+  });
+
+  const route = result.routes?.[0];
+  if (!route) {
+    throw new Error('NO_ROUTE');
+  }
+
+  const path = pathFromDirectionsRoute(route);
+  if (path.length < 2) {
+    throw new Error('NO_PATH');
+  }
+
+  return path;
 }
 
 function decimateWaypoints(points: LatLng[], maxPoints: number): LatLng[] {
@@ -204,29 +319,12 @@ export async function buildChainedRoadPath(
   };
 }
 
-function pathFromRoute(route: google.maps.routes.Route): LatLng[] {
-  const path: LatLng[] = [];
-
-  for (const polyline of route.createPolylines()) {
-    const latLngs = polyline.getPath();
-    if (!latLngs) continue;
-
-    for (let i = 0; i < latLngs.getLength(); i++) {
-      const latLng = latLngs.getAt(i);
-      if (!latLng) continue;
-      path.push({ lat: latLng.lat(), lng: latLng.lng() });
-    }
-  }
-
-  return path;
-}
-
 function warningForRouteError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
 
   if (/PERMISSION_DENIED|REQUEST_DENIED|403|FORBIDDEN|API key/i.test(message)) {
     return (
-      'Google recusou a Routes API (403). Habilite a Routes API no Google Cloud e ' +
+      'Google recusou a API de rotas (403). Habilite Routes API e Directions API no Google Cloud e ' +
       'libere os referrers https://livretracker.com/* e http://localhost:5173/*.'
     );
   }
@@ -277,7 +375,9 @@ async function computeRouteThroughRoutes(
     origin: waypoints[0],
     destination: waypoints[waypoints.length - 1],
     travelMode: 'DRIVING',
-    fields: ['path'],
+    routingPreference: 'TRAFFIC_UNAWARE',
+    polylineQuality: 'HIGH_QUALITY',
+    fields: ['path', 'distanceMeters', 'durationMillis'],
   };
 
   if (waypoints.length > 2) {
@@ -304,6 +404,7 @@ async function computeRouteThroughRoutes(
 export function createRouteProvider(
   Route: RouteClass,
   apiKey: string,
+  directionsService?: google.maps.DirectionsService,
 ): RouteProvider {
   async function computeSegmentPath(from: LatLng, to: LatLng): Promise<LatLng[]> {
     try {
@@ -315,6 +416,19 @@ export function createRouteProvider(
       }
     } catch {
       // tenta fallback abaixo
+    }
+
+    if (directionsService) {
+      try {
+        const routed = filterValidLatLng(
+          await computeRouteThroughDirections(directionsService, [from, to]),
+        );
+        if (routed.length >= 2 && isReasonableRoute(from, to, routed)) {
+          return routed;
+        }
+      } catch {
+        // tenta fallback abaixo
+      }
     }
 
     try {
@@ -350,7 +464,15 @@ export function createRouteProvider(
       } catch {
         snappedWaypoints = rawWaypoints;
       }
-      return computeRouteThroughRoutes(Route, snappedWaypoints, rawWaypoints);
+
+      try {
+        return await computeRouteThroughRoutes(Route, snappedWaypoints, rawWaypoints);
+      } catch {
+        if (!directionsService) {
+          throw new Error('NO_ROUTE');
+        }
+        return computeRouteThroughDirections(directionsService, snappedWaypoints);
+      }
     },
   };
 }

@@ -5,9 +5,16 @@ type RegisteredPointsPanelProps = {
   validLocations: DeviceLocation[];
   invalidLocations: DeviceLocation[];
   formatSpeed: (speedKnots?: number) => string;
-  formatBattery: (batteryPercent?: number) => string;
+  formatBattery: (
+    point: Pick<DeviceLocation, 'battery_percent' | 'usb_connected' | 'battery_charging'>,
+  ) => string;
   selectedIndex?: number | null;
   onSelectPoint?: (index: number) => void;
+  allDayStationaryFallback?: {
+    lastReadingAt: string;
+    point: DeviceLocation;
+    isToday?: boolean;
+  } | null;
 };
 
 export function RegisteredPointsPanel({
@@ -17,6 +24,7 @@ export function RegisteredPointsPanel({
   formatBattery,
   selectedIndex = null,
   onSelectPoint,
+  allDayStationaryFallback = null,
 }: RegisteredPointsPanelProps) {
   return (
     <div className="tracking-points-panel">
@@ -71,12 +79,26 @@ export function RegisteredPointsPanel({
                   <td>{point.latitude.toFixed(6)}</td>
                   <td>{point.longitude.toFixed(6)}</td>
                   <td>{formatSpeed(point.speed_knots)}</td>
-                  <td>{formatBattery(point.battery_percent)}</td>
+                  <td>{formatBattery(point)}</td>
                   <td>{point.location_source?.toUpperCase() ?? '—'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      ) : allDayStationaryFallback ? (
+        <div className="card tracking-points-fallback">
+          <p className="tracking-points-fallback-title">
+            {allDayStationaryFallback.isToday
+              ? 'Está neste local até o momento'
+              : 'Permaneceu todo o dia neste local'}
+          </p>
+          <p className="muted tracking-points-fallback-meta">
+            Sem novas leituras neste dia. Última posição registrada em{' '}
+            {formatRecordedDateTime(allDayStationaryFallback.lastReadingAt)} (
+            {allDayStationaryFallback.point.latitude.toFixed(6)},{' '}
+            {allDayStationaryFallback.point.longitude.toFixed(6)}).
+          </p>
         </div>
       ) : (
         <div className="card empty-state">
